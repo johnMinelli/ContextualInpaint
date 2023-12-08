@@ -402,14 +402,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         return image, has_nsfw_concept
 
     def _decode_vae_latents(self, latents):
-        deprecation_message = "The decode_latents method is deprecated and will be removed in 1.0.0. Please use VaeImageProcessor.postprocess(...) instead"
-        deprecate("decode_latents", "1.0.0", deprecation_message, standard_warn=False)
-
         latents = 1 / self.vae.config.scaling_factor * latents
         image = self.vae.decode(latents, return_dict=False)[0]
-        # image = (image / 2 + 0.5).clamp(0, 1)
-        # # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-        # image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
 
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -515,8 +509,6 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
             for image_ in image:
                 self.check_image(image_, prompt, prompt_embeds)
-        else:
-            assert False
 
         # Check `controlnet_conditioning_scale`
         if (
@@ -541,8 +533,6 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     "For multiple controlnets: When `controlnet_conditioning_scale` is specified as `list`, it must have"
                     " the same length as the number of controlnets"
                 )
-        else:
-            assert False
 
         if not isinstance(control_guidance_start, (tuple, list)):
             control_guidance_start = [control_guidance_start]
@@ -960,14 +950,14 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         device = self._execution_device
         do_classifier_free_guidance = guidance_scale > 1 and self.unet.config.time_cond_proj_dim is None
         self._clip_skip = clip_skip
-        self._cross_attention_kwargs = cross_attention_kwargs
+        self._cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
 
         if isinstance(controlnet, MultiControlNetModel) and isinstance(controlnet_conditioning_scale, float):
             controlnet_conditioning_scale = [controlnet_conditioning_scale] * len(controlnet.nets)
 
         global_pool_conditions = (
-            controlnet.config.global_pool_conditions
-            if isinstance(controlnet, ControlNetModel)
+            False if controlnet is None
+            else controlnet.config.global_pool_conditions if isinstance(controlnet, ControlNetModel)
             else controlnet.nets[0].config.global_pool_conditions
         )
         guess_mode = guess_mode or global_pool_conditions
@@ -1017,8 +1007,6 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
             control_image = control_images
             height, width = control_image[0].shape[-2:]
-        else:
-            assert False
 
         # Preprocess mask and image - resizes image and mask w.r.t height and width
         if image is None:
@@ -1081,16 +1069,13 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
             timestep_cond = self.get_guidance_scale_embedding(guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim).to(device=device, dtype=noisy_latents.dtype)
 
-        # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        # 7. Prepare extra step kwargs
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7.1 Create tensor stating which controlnets to keep
         controlnet_keep = []
         for i in range(len(timesteps)):
-            keeps = [
-                1.0 - float(i / len(timesteps) < s or (i + 1) / len(timesteps) > e)
-                for s, e in zip(control_guidance_start, control_guidance_end)
-            ]
+            keeps = [1.0 - float(i / len(timesteps) < s or (i + 1) / len(timesteps) > e) for s, e in zip(control_guidance_start, control_guidance_end)]
             controlnet_keep.append(keeps[0] if isinstance(controlnet, ControlNetModel) else keeps)
 
         # 8. Denoising loop
@@ -1115,45 +1100,50 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # controlnet(s) inference
-                if guess_mode and do_classifier_free_guidance:
-                    # Infer ControlNet only for the conditional batch.
-                    control_model_input = noisy_latents
-                    control_model_input = self.scheduler.scale_model_input(control_model_input, t)
-                    controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
+                if controlnet is not None: 
+                    if guess_mode and do_classifier_free_guidance:
+                        # Infer ControlNet only for the conditional batch.
+                        control_model_input = noisy_latents
+                        control_model_input = self.scheduler.scale_model_input(control_model_input, t)
+                        controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
+                    else:
+                        control_model_input = latent_model_input
+                        controlnet_prompt_embeds = prompt_embeds
+    
+                    if isinstance(controlnet_keep[i], list):
+                        cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+                    else:
+                        controlnet_cond_scale = controlnet_conditioning_scale
+                        if isinstance(controlnet_cond_scale, list):
+                            controlnet_cond_scale = controlnet_cond_scale[0]
+                        cond_scale = controlnet_cond_scale * controlnet_keep[i]
+    
+                    down_block_res_samples, mid_block_res_sample = self.controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=controlnet_prompt_embeds,
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+    
+                    if guess_mode and do_classifier_free_guidance:
+                        # Infered ControlNet only for the conditional batch.
+                        # To apply the output of ControlNet to both the unconditional and conditional batches,
+                        # add 0 to the unconditional batch to keep it unchanged.
+                        down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                        mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
                 else:
-                    control_model_input = latent_model_input
-                    controlnet_prompt_embeds = prompt_embeds
-
-                if isinstance(controlnet_keep[i], list):
-                    cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
-                else:
-                    controlnet_cond_scale = controlnet_conditioning_scale
-                    if isinstance(controlnet_cond_scale, list):
-                        controlnet_cond_scale = controlnet_cond_scale[0]
-                    cond_scale = controlnet_cond_scale * controlnet_keep[i]
-
-                down_block_res_samples, mid_block_res_sample = self.controlnet(
-                    control_model_input,
-                    t,
-                    encoder_hidden_states=controlnet_prompt_embeds,
-                    controlnet_cond=control_image,
-                    conditioning_scale=cond_scale,
-                    guess_mode=guess_mode,
-                    return_dict=False,
-                )
-
-                if guess_mode and do_classifier_free_guidance:
-                    # Infered ControlNet only for the conditional batch.
-                    # To apply the output of ControlNet to both the unconditional and conditional batches,
-                    # add 0 to the unconditional batch to keep it unchanged.
-                    down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
-                    mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
+                    down_block_res_samples = None
+                    mid_block_res_sample = None
 
                 # predict the noise residual
                 if mask_image is not None and num_channels_unet == 9:
                     # Heavy inpaint: give as input image, mask and masked imaget to let the model predict noise conscious of the inpainting process
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
+                self.cross_attention_kwargs.update({"t": t})
                 noise_pred = self.unet(
                     latent_model_input,
                     t,

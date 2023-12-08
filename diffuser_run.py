@@ -25,7 +25,7 @@ args = Eval_args().parse_args()
 
 
 # load control net and stable diffusion v1-5
-controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=torch.float32)
+controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=torch.float32) if args.controlnet_model_name_or_path is not None else None
 pipe = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         controlnet=controlnet, 
@@ -41,6 +41,7 @@ for module in pipe.unet.modules():
         # placeholder function for the original forward
         module.ori_forward = module.forward
         module.forward = types.MethodType(new_forward, module)
+        module.cfg = {"t_align": 200}
 
 # optimization
 if args.enable_cpu_offload:
@@ -56,26 +57,27 @@ else:
 
 
 validation_data = json.load(codecs.open(args.evaluation_file, 'r', 'utf-8-sig'))
-validation_images = validation_data['validation_images']
+validation_prompts = validation_data['validation_prompts']
 
 def raiser(): raise ValueError("number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`")
-replicate = lambda x: x if len(x) == len(validation_images) else x * len(validation_images) if len(x) == 1 else [None] * len(validation_images) if len(x) == 0 else raiser()
-validation_controls = replicate(validation_data['validation_controls'])
+replicate = lambda x: x if len(x) == len(validation_prompts) else x * len(validation_prompts) if len(x) == 1 else [None] * len(validation_prompts) if len(x) == 0 else raiser()
+validation_images = replicate(validation_data['validation_images'])
 validation_masks = replicate(validation_data['validation_masks'])
-validation_prompts = replicate(validation_data['validation_prompts'])
+validation_controls = replicate(validation_data['validation_controls'])
+validation_neg_prompts = replicate(validation_data['validation_neg_prompts'])
 
 image_logs = []
-for prompt, image, mask, control in zip(validation_prompts, validation_images, validation_masks, validation_controls):
+for prompt, neg_prompt, image, mask, control in zip(validation_prompts, validation_neg_prompts, validation_images, validation_masks, validation_controls):
     image = Image.open(image).convert("RGB") if image is not None else None
-    mask_control = Image.open(mask).convert("RGB") if mask is not None else None
     mask = Image.open(mask).convert("L") if mask is not None else None
+    mask_control = Image.open(mask).convert("RGB") if mask is not None else None
     control = Image.open(control).convert("RGB") if control is not None else None
+    neg_prompt = neg_prompt if type(neg_prompt) == list else [neg_prompt]*len(prompt)
 
     images = []
-
     for _ in range(args.num_validation_images):
         with torch.autocast(f"cuda"):
-            pred_image = pipe(prompt=prompt, image=image, mask_image=mask, control_image=mask_control, height=args.resolution, width=args.resolution,
+            pred_image = pipe(prompt=prompt, begative_prompt=neg_prompt, height=args.resolution, width=args.resolution,
                               strength=1.0, controlnet_conditioning_scale=0.8, guidance_scale=7.5, guess_mode=False, num_inference_steps=args.steps, generator=generator).images[0]
         images.append(pred_image)
 
@@ -111,4 +113,4 @@ elif args.log == "wandb":
     run.log({"evaluation": formatted_images})
     wandb.finish()
 else:
-    logger.warn(f"image logging not implemented for {args.log}")
+    logger.warning(f"image logging not implemented for {args.log}")
