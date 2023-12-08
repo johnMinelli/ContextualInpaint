@@ -29,6 +29,7 @@ from diffusers.pipelines.stable_diffusion.pipeline_output import StableDiffusion
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 
+from RIVAL.rival.sd_pipeline_controlnet import adain_latent
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -1143,7 +1144,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     # Heavy inpaint: give as input image, mask and masked imaget to let the model predict noise conscious of the inpainting process
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
-                self.cross_attention_kwargs.update({"t": t})
+                self.cross_attention_kwargs.update({"t": t, "stage": [True, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False]})
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
@@ -1159,6 +1160,11 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                
+                # compute the previous noisy sample x_t -> x_t-1
+                if noise_pred.shape[0] > 1 and t > 400:
+                    noise_pred[0] = adain_latent(noise_pred[0:1], noise_pred[1:2])[0]  # mix of the pred_noises for first 600 steps
+
 
                 # compute the previous noisy sample x_t -> x_t-1
                 denoised_latents = self.scheduler.step(noise_pred, t, noisy_latents, **extra_step_kwargs, return_dict=False)[0]
