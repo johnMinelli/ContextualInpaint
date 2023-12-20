@@ -122,7 +122,10 @@ def load_image(image_file):
         response = requests.get(image_file)
         image = Image.open(BytesIO(response.content)).convert('RGB')
     else:
-        image = Image.open(image_file).convert('RGB')
+        try:
+            image = Image.open(image_file).convert('RGB')
+        except Exception as e:
+            print(f"Error opening: {image_file}")
     return image
 
 if __name__ == "__main__":

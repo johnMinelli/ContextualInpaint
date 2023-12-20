@@ -32,7 +32,9 @@ def save_frames(video_path, output_path):
         # Save the frame as an image
         frame_filename = f"frame_{frame_counter}.jpg"
         frame_filepath = os.path.join(output_path, frame_filename)
-        frame_resized = cv2.resize(frame, (512, 512))
+        # Resize by crop
+        frame_resized = frame[:, -frame.shape[0]:, :]
+        frame_resized = cv2.resize(frame_resized, (512, 512))
         cv2.imwrite(frame_filepath, frame_resized)
 
     # Release the video capture object
@@ -107,7 +109,7 @@ def save_annotated_frames(video_path, timestamps_file, annotations_file, output_
 if __name__ == '__main__':
 
     input_path = "../data/verizon"
-    output_path = "../data/verizon_formatted"
+    output_path = "../data/verizon_formatted2/target"
 
     annotations_file = f"{input_path}\\tasklevel.chunks_90.csv"
 
@@ -118,7 +120,7 @@ if __name__ == '__main__':
         #     file.write(content)
 
         for run in files:
-            print("Folder:", root)
+            print("Video:", os.path.join(root, run))
             video_path = os.path.join(root, f"{run}.mp4")
             timestamps_file =  os.path.join(root, f"{run}.timestamps")
 

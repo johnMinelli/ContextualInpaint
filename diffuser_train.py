@@ -33,7 +33,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from safetensors.torch import load_file, save_file
 
-from dataset import DiffuserDataset, ControlNetDataset
+from dataset import DiffuserDataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
@@ -60,7 +60,7 @@ from utils.utils import import_text_encoder_from_model_name_or_path
 
 if is_wandb_available():
     import wandb
-    wandb.init(project="train_controlnet", resume="kh8k7kgx")
+    # wandb.init(project="train_controlnet", resume="k065l4gi")
 
 
 logger = get_logger(__name__)
@@ -115,7 +115,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
 
         for i in range(args.num_validation_images):
             with torch.autocast(f"cuda"):
-                pred_image = pipeline(prompt=prompt, negative_prompt=neg_prompt, image=image, mask_image=mask, control_image=mask_control, height=512,
+                pred_image = pipeline(prompt=prompt, negative_prompt=neg_prompt, image=image, mask_image=mask_control, control_image=mask_control, height=512,
                                       strength=1.0, controlnet_conditioning_scale=0.9, width=512, num_inference_steps=20, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
             images.append(pred_image)
 
@@ -371,8 +371,8 @@ class Trainer():
         )
 
         # Prepare everything with our `accelerator`.
-        self.unet, self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
-            self.unet, self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler
+        self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
+            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
 
         # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -385,7 +385,7 @@ class Trainer():
 
         # Move vae, unet and text_encoder to device and cast to weight_dtype
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
-        # self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         # Init class to have access to utility prepare functions (refactoring in a static version would be nicer)
         self.pipe_utils = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(args.pretrained_model_name_or_path, vae=self.vae, text_encoder=self.text_encoder, tokenizer=self.tokenizer, unet=self.unet, controlnet=self.controlnet, safety_checker=None, revision=args.revision, torch_dtype=self.weight_dtype)
@@ -430,7 +430,7 @@ class Trainer():
                 args.resume = None
                 self.initial_global_step = 0
             else:
-                # if args.sd_unlock:
+                # if args.sd_unlock > 0:
                 #     a = load_file(os.path.join(args.output_dir, path, "controlnet", "diffusion_pytorch_model.safetensors"))
                 #     a.update({f"up_blocks.{k}":v for k,v in self.unet.up_blocks.state_dict().items()})
                 #     a.update({f"conv_norm_out.{k}":v for k,v in self.unet.conv_norm_out.state_dict().items()})
@@ -486,8 +486,8 @@ class Trainer():
                     # Sample random noise and add it to the latents according to the noise magnitude at each timestep (forward diffusion process)
                     noise = torch.randn_like(latents)
 
-                    if mask is not None and self.unet.config.in_channels == 4:
-                        noise[torch.nn.functional.interpolate(mask, size=noise.shape[-2:]).expand(noise.shape)==0]=0
+                    # if mask is not None and self.unet.config.in_channels == 4:
+                    #     noise[torch.nn.functional.interpolate(mask, size=noise.shape[-2:]).expand(noise.shape)==0]=0
 
                     noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
                     # noisy_latents = self.noise_scheduler.scale_model_input(noise_net, timesteps_net)  # Only for sampling from random noise
@@ -504,11 +504,12 @@ class Trainer():
                     control_image = self.pipe_utils.prepare_control_image(control_image, bs*1, 1, self.accelerator.device, self.weight_dtype, self.do_classifier_free_guidance)
 
                     # Prompt to embeddings
-                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, self.do_classifier_free_guidance, 1, batch["neg_txt"], return_tuple=False)
+                    encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, self.do_classifier_free_guidance, 1, batch["txt"], return_tuple=False)
+                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, self.do_classifier_free_guidance, 1, batch["txt"], return_tuple=False)
 
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         noisy_latents_model_input, timesteps_model_input,
-                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_hidden_states=encoder_hidden_states_ctrl,
                         controlnet_cond=control_image,
                         conditioning_scale=args.controlnet_conditioning_scale,
                         return_dict=False,
