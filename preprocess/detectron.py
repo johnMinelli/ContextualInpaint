@@ -25,7 +25,7 @@ from sys import platform
 # from densepose import add_densepose_config
 
 # from detectron2.projects.DensePose.apply_net import ShowAction
-from preprocess.prompt_llava import Predictor
+# from preprocess.prompt_llava import Predictor
 
 DATA_PATH = "../data/verizon_formatted2/"
 
