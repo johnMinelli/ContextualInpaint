@@ -91,13 +91,12 @@ def run_pose_estimation(args: argparse.Namespace):
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Keypoints/keypoint_rcnn_R_101_FPN_3x.yaml")
     predictor = DefaultPredictor(cfg)
 
-    poses = {}
     for root, dirs, files in os.walk(args.get("input_path", os.path.join(DATA_PATH, "target"))):
         if len(files)==0: continue
         print("Entering:", root)
         for file in tqdm(files):
-            if not file.endswith(".jpg"): continue
-            im = cv2.imread(os.path.join(root,file))
+            if not file.endswith(".jpg") and not file.endswith(".png"): continue
+            im = cv2.imread(os.path.join(root, file))
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 outputs = predictor(im)["instances"].to("cpu")
@@ -119,8 +118,6 @@ def run_pose_estimation(args: argparse.Namespace):
                 os.makedirs(poses_folder)
             # Save
             plt.imsave(os.path.join(poses_folder, file), out)
-
-    torch.save(poses, DATA_PATH+"poses.txt")
 
 def run_openpose_estimation(args: argparse.Namespace):
     # Openpose Import (Windows/Ubuntu/OSX)
