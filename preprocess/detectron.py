@@ -39,7 +39,7 @@ def run_masking(args: argparse.Namespace):
     predictor = DefaultPredictor(cfg)
 
     # Create masked source files
-    for root, dirs, files in os.walk(os.path.join(args.get("input_path", DATA_PATH), "target")):
+    for root, dirs, files in os.walk(args.get("input_path", os.path.join(DATA_PATH, "target"))):
         if len(files)==0: continue
         print("Entering folder:", root)
         for file in tqdm(files):
@@ -92,7 +92,7 @@ def run_pose_estimation(args: argparse.Namespace):
     predictor = DefaultPredictor(cfg)
 
     poses = {}
-    for root, dirs, files in os.walk(os.path.join(args.get("input_path", DATA_PATH), "target")):
+    for root, dirs, files in os.walk(args.get("input_path", os.path.join(DATA_PATH, "target"))):
         if len(files)==0: continue
         print("Entering:", root)
         for file in tqdm(files):
