@@ -1,4 +1,59 @@
-﻿from transformers import PretrainedConfig
+﻿import os
+
+import torch
+from PIL.Image import Image
+from diffusers.pipelines.controlnet import MultiControlNetModel
+from transformers import PretrainedConfig
+import torch.nn.functional as F
+
+
+def not_image(filename: str):
+    return not filename.endswith(".jpeg") and not filename.endswith(".jpg") and not filename.endswith(".png")
+
+def raiser(): raise ValueError(
+    "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`")
+
+def replicate(x, n):
+    return x if len(x) == n else x * n if len(x) == 1 else [None] * n if len(x) == 0 else raiser()
+
+def mask_block(binary_mask, x):
+    return F.interpolate(binary_mask.float(), size=x.shape[-2:], mode='nearest').bool().expand_as(x) * x
+
+def split_multi_net(controlnet, attention_mask, encoder_hidden_states, controlnet_cond, conditioning_scale, guess_mode, batch_size, **args):
+    down_block_res_samples, mid_block_res_sample = None, None
+    if isinstance(controlnet, MultiControlNetModel):
+        controlnets = controlnet.nets
+        # split the first dim flattened [guess_mode*batch*prompts*num_images] to [prompts,guess_mode*batch*num_images]  
+        _, seq, hid = encoder_hidden_states.shape
+        _, c, h, w = controlnet_cond.shape
+        cfg_chunks = 2 - int(guess_mode)
+        encoder_hidden_states = torch.stack(torch.stack(encoder_hidden_states.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnets), seq,hid).permute(1,0,2,3)
+        controlnet_cond = torch.stack(torch.stack(controlnet_cond.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnets), c,h,w).permute(1,0,2,3,4)
+    else:
+        controlnets = [controlnet]
+        conditioning_scale = [conditioning_scale]
+        encoder_hidden_states = [encoder_hidden_states]
+        controlnet_cond = [controlnet_cond]
+
+    for i, (controlnet, enc_hid_state, image, scale) in enumerate(zip(controlnets, encoder_hidden_states, controlnet_cond, conditioning_scale)):
+        down_samples, mid_sample = controlnet(encoder_hidden_states=enc_hid_state,
+                                              controlnet_cond=image,
+                                              conditioning_scale=scale,
+                                              guess_mode=guess_mode, **args)
+        # Apply attention focused mask
+        if attention_mask is not None and (len(controlnets) == 1 or i>0):
+            # match the size and apply mask
+            mid_sample = mask_block(attention_mask, mid_sample)
+            down_samples = [mask_block(attention_mask, block) for block in down_samples]
+            
+        # Merge samples
+        if i == 0:
+            down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
+        else:
+            down_block_res_samples = [samples_prev + samples_curr for samples_prev, samples_curr in zip(down_block_res_samples, down_samples)]
+            mid_block_res_sample += mid_sample
+
+    return down_block_res_samples, mid_block_res_sample
 
 
 def import_text_encoder_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):

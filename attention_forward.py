@@ -134,4 +134,4 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.
     attn_weight_hot = torch.softmax(add_att if add_att is not None else attn_weight, dim=-1)
     attn_weight_hot = torch.dropout(attn_weight_hot, dropout_p, train=True)
 
-    return attn_weight, attn_weight_hot @ value
+    return attn_weight_hot, attn_weight_hot @ value

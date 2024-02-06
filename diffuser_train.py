@@ -38,7 +38,8 @@ from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, CLIPVisionModel, CLIPTextModel, CLIPTextModelWithProjection, \
+    CLIPVisionModelWithProjection
 
 import diffusers
 from diffusers import (
@@ -56,26 +57,32 @@ from diffusers.utils.import_utils import is_xformers_available
 
 from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from utils.parser import Train_args
-from utils.utils import import_text_encoder_from_model_name_or_path
+from utils.utils import import_text_encoder_from_model_name_or_path, replicate, mask_block
 
 if is_wandb_available():
     import wandb
-    # wandb.init(project="train_controlnet", resume="k065l4gi")
+    wandb.init(project="train_controlnet", resume="gjn070jq")
 
 
 logger = get_logger(__name__)
+TRAIN_OBJ_MASKING = False
 
-def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
+def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
-
+    # get trained network
     controlnet = accelerator.unwrap_model(controlnet)
+    # costly deepcopy but necessary if you mod cross attention layers
+    unet_clone = copy.deepcopy(unet)
 
     pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
+        controlnet_text_encoder=controlnet_text_encoder,
+        controlnet_image_encoder=controlnet_image_encoder,
+        controlnet_prompt_seq_projection=TRAIN_OBJ_MASKING,
         tokenizer=tokenizer,
-        unet=unet,
+        unet=unet_clone,
         controlnet=controlnet,
         safety_checker=None,
         revision=args.revision,
@@ -88,38 +95,40 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
     if args.enable_xformers_memory_efficient_attention:
         pipeline.enable_xformers_memory_efficient_attention()
 
-    if args.seed is None:
-        generator = None
-    else:
-        generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+    if args.enable_cpu_offload:
+        pipeline.enable_model_cpu_offload()
+
+    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
 
     validation_data = json.load(codecs.open(args.validation_file, 'r', 'utf-8-sig'))
 
     # Access the values as a dictionary
-    validation_images = validation_data['validation_images']
-    def raiser(): raise ValueError("number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`")
-    replicate = lambda x: x if len(x) == len(validation_images) else x * len(validation_images) if len(x) == 1 else [None] * len(validation_images) if len(x) == 0 else raiser()
-    validation_controls = replicate(validation_data['validation_controls'])
-    validation_masks = replicate(validation_data['validation_masks'])
-    validation_prompts = replicate(validation_data['validation_prompts'])
-    validation_neg_prompts = replicate(validation_data['validation_neg_prompts'])
-    
+    images = validation_data['validation_images']
+    n = len(images)
+    conditioning = replicate(validation_data.get('validation_conditioning', []), n)
+    masks = replicate(validation_data.get('validation_masks', []), n)
+    prompts = replicate(validation_data.get('validation_prompts', []), n)
+    neg_prompts = replicate(validation_data.get('validation_neg_prompts', []), n)
+    control_prompts = replicate(validation_data.get('validation_control_prompts', []), n)
+    focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
+
     image_logs = []
-    for prompt, neg_prompt, image, mask, control in zip(validation_prompts, validation_neg_prompts, validation_images, validation_masks, validation_controls):
+    for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts):
         image = Image.open(image).convert("RGB") if image is not None else None
-        mask_control = Image.open(mask).convert("RGB") if mask is not None else None
+        mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
         mask = Image.open(mask).convert("L") if mask is not None else None
-        control = Image.open(control).convert("RGB") if control is not None else None
+        conditioning = Image.open(conditioning).convert("RGB") if conditioning is not None else None
+        focus_prompt = [focus_prompt] if focus_prompt else None
 
         images = []
-
         for i in range(args.num_validation_images):
             with torch.autocast(f"cuda"):
-                pred_image = pipeline(prompt=prompt, negative_prompt=neg_prompt, image=image, mask_image=mask_control, control_image=mask_control, height=512,
-                                      strength=1.0, controlnet_conditioning_scale=0.9, width=512, num_inference_steps=20, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
+                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
+                                      image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
+                                      strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
             images.append(pred_image)
 
-        image_logs.append({"reference": image, "images": images, "prompt": prompt})
+        image_logs.append({"reference": image, "images": images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
 
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
@@ -128,13 +137,9 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
                 prompt = log["prompt"]
                 image = log["reference"]
 
-                formatted_images = []
-
-                formatted_images.append(np.asarray(image))
-
+                formatted_images = [np.asarray(image)]
                 for image in images:
                     formatted_images.append(np.asarray(image))
-
                 formatted_images = np.stack(formatted_images)
 
                 tracker.writer.add_images(prompt, formatted_images, step, dataformats="NHWC")
@@ -147,7 +152,6 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
                 image = log["reference"]
 
                 formatted_images.append(wandb.Image(image, caption="Reference"))
-
                 for image in images:
                     image = wandb.Image(image, caption=prompt)
                     formatted_images.append(image)
@@ -215,6 +219,9 @@ class Trainer():
         # Load scheduler and models
         self.noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         self.text_encoder = text_encoder_cls.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+        # Custom encoder since sd2 doesn't have the weights for the visual counterpart necessary for obj_masking controlnet 
+        self.controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+        self.controlnet_image_encoder = CLIPVisionModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
         self.vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
         self.unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision)
         if args.controlnet_model_name_or_path:
@@ -223,7 +230,7 @@ class Trainer():
         else:
             logger.info("Initializing controlnet weights from unet")
             net_for_w = copy.deepcopy(self.unet)
-            if self.unet.config.in_channels != 4:
+            if self.unet.config.in_channels != 4:  # NOTE: hardcoded init with sd2.0 weights
                 net_for_w.conv_in = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-2-base", subfolder="unet",revision=args.revision).conv_in
                 net_for_w.config.in_channels = 4
             self.controlnet = ControlNetModel.from_unet(net_for_w)
@@ -270,7 +277,7 @@ class Trainer():
                 device = torch.device("cuda")
 
                 hook = None
-                for cpu_offloaded_model in [self.text_encoder, self.unet, self.vae]:
+                for cpu_offloaded_model in [self.text_encoder, self.image_encoder, self.controlnet_text_encoder, self.unet, self.vae]:
                     _, hook = cpu_offload_with_hook(cpu_offloaded_model, device, prv_module_hook=hook)
 
                 if self.safety_checker is not None:
@@ -290,6 +297,8 @@ class Trainer():
         self.vae.requires_grad_(False)
         self.unet.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
+        self.controlnet_image_encoder.requires_grad_(False)
+        self.controlnet_text_encoder.requires_grad_(False)
         self.controlnet.train()
 
         # Settings for optimization
@@ -342,10 +351,12 @@ class Trainer():
         else:
             optimizer_class = torch.optim.AdamW
 
+        # pass controlnet and (optionally) sd parameters to optimizer
         params = list(self.controlnet.parameters())
         if args.sd_unlock > 0:
             params += self.unet.up_blocks.parameters()
             params += self.unet.conv_norm_out.parameters()
+
         self.optimizer = optimizer_class(
             params,
             lr=args.learning_rate,
@@ -370,7 +381,7 @@ class Trainer():
             power=args.lr_power,
         )
 
-        # Prepare everything with our `accelerator`.
+        # Prepare everything with accelerator library
         self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
@@ -387,10 +398,12 @@ class Trainer():
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
-        # Init class to have access to utility prepare functions (refactoring in a static version would be nicer)
-        self.pipe_utils = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(args.pretrained_model_name_or_path, vae=self.vae, text_encoder=self.text_encoder, tokenizer=self.tokenizer, unet=self.unet, controlnet=self.controlnet, safety_checker=None, revision=args.revision, torch_dtype=self.weight_dtype)
+        self.controlnet_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.controlnet_image_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        # Init class to have access to utility functions (refactoring to static methods would be nicer)
+        self.pipe_utils = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(args.pretrained_model_name_or_path, vae=self.vae, text_encoder=self.text_encoder, controlnet_image_encoder=self.controlnet_image_encoder, controlnet_text_encoder=self.controlnet_text_encoder, tokenizer=self.tokenizer, unet=self.unet, controlnet=self.controlnet, safety_checker=None, revision=args.revision, torch_dtype=self.weight_dtype)
 
-        # We need to initialize the trackers we use, and also store our configuration.
+        # Initialize the trackers we use, and also store our configuration.
         # The trackers initialize automatically on the main process.
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
@@ -398,6 +411,7 @@ class Trainer():
         # Train variables
         self.global_step = 0
         self.first_epoch = 0
+        self.initial_global_step = 0
         self.num_samples = len(self.train_dataset)
         self.num_batches_per_epoch = len(self.train_dataloader)
         self.total_batch_size = args.train_batch_size * self.accelerator.num_processes * args.gradient_accumulation_steps
@@ -405,13 +419,9 @@ class Trainer():
         num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / args.gradient_accumulation_steps)
         if override_max_train_steps:
             args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        # Afterwards we recalculate our number of training epochs
+        # Afterward we recalculate our number of training epochs
         args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        # `guidance_scale = 1` corresponds to doing no classifier free guidance.
-        self.do_classifier_free_guidance = args.guidance_scale > 1.0
-        # if is a MultiControlNet we should parametrize it
-        args.controlnet_conditioning_scale = 1.0
         # Load the weights and states from a previous save, if necessary
         if args.resume:
             if args.resume != "latest":
@@ -443,11 +453,8 @@ class Trainer():
 
                 self.initial_global_step = self.global_step
                 self.first_epoch = self.global_step // num_update_steps_per_epoch
-        else:
-            self.initial_global_step = 0
 
     def train(self):
-
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {self.num_samples}")
         logger.info(f"  Num batches each epoch = {self.num_batches_per_epoch}")
@@ -465,19 +472,20 @@ class Trainer():
             disable=not self.accelerator.is_local_main_process,
         )
 
+        training_nets = [self.controlnet]
         for epoch in range(self.first_epoch, args.num_train_epochs):
             for step, batch in enumerate(self.train_dataloader):
                 if args.sd_unlock > 0 and step >= args.sd_unlock:
                     args.sd_unlock = -1
                     self.unet.up_blocks.requires_grad_(True)
                     self.unet.conv_norm_out.requires_grad_(True)
-                
-                acc_models = [self.controlnet] if args.sd_unlock > 0 else [self.controlnet, self.unet]
-                with self.accelerator.accumulate(*acc_models):
+                    training_nets = [self.controlnet, self.unet]
+
+                with (self.accelerator.accumulate(*training_nets)):
                     # Convert images to latent space
                     image = batch["image"].to(dtype=self.weight_dtype)
-                    mask = batch["mask"].to(dtype=self.weight_dtype) if "mask" in batch else None
-                    control_image = batch["control"].to(dtype=self.weight_dtype) if "control" in batch else None
+                    mask = batch.get("mask").to(dtype=self.weight_dtype) if "mask" in batch else None
+                    conditioning_image = batch["conditioning"].to(dtype=self.weight_dtype) if "conditioning" in batch else None
                     bs, _, h, w = image.shape
                     timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (bs,), device=self.accelerator.device).long()
 
@@ -490,32 +498,44 @@ class Trainer():
                     #     noise[torch.nn.functional.interpolate(mask, size=noise.shape[-2:]).expand(noise.shape)==0]=0
 
                     noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-                    # noisy_latents = self.noise_scheduler.scale_model_input(noise_net, timesteps_net)  # Only for sampling from random noise
-                    noisy_latents_model_input = torch.cat([noisy_latents] * 2) if self.do_classifier_free_guidance else noisy_latents
-                    timesteps_model_input = torch.cat([timesteps] * 2) if self.do_classifier_free_guidance else timesteps
+                    noisy_latents_model_input = noisy_latents
+                    timesteps_model_input = timesteps
 
                     # Mask and latents from masked_image
                     if mask is not None:
                         masked_image = image.clone()
                         masked_image[mask.expand(image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
-                        mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, bs*1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=self.do_classifier_free_guidance)
+                        mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, bs*1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
 
                     # Control Image
-                    control_image = self.pipe_utils.prepare_control_image(control_image, bs*1, 1, self.accelerator.device, self.weight_dtype, self.do_classifier_free_guidance)
+                    conditioning_image = self.pipe_utils.prepare_conditioning_image(conditioning_image, bs*1, 1, self.accelerator.device, self.weight_dtype, do_classifier_free_guidance=False)
 
                     # Prompt to embeddings
-                    encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, self.do_classifier_free_guidance, 1, batch["txt"], return_tuple=False)
-                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, self.do_classifier_free_guidance, 1, batch["txt"], return_tuple=False)
+                    assert (not TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]=="") or (TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]!=""), "ERR: TRAIN_OBJ_MASKING is False/True but `ctrl_txt_image` is/is not provided."
+
+                    flag_image_as_hid_prompt = (np.random.random() > 0.5) if TRAIN_OBJ_MASKING else False
+
+                    encoder, ctrl_prompt = (self.controlnet_image_encoder, [os.path.join(args.train_data_dir, p) for p in batch["ctrl_txt_image"]]) \
+                        if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
+                    encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
+                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
+
+                    if TRAIN_OBJ_MASKING:
+                        # apply projection layer to all sequence tokens to match size between the two encoders
+                        encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
+                            if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
 
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         noisy_latents_model_input, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states_ctrl,
-                        controlnet_cond=control_image,
-                        conditioning_scale=args.controlnet_conditioning_scale,
+                        controlnet_cond=conditioning_image,
                         return_dict=False,
                     )
 
                     if mask is not None and self.unet.config.in_channels == 9:
+                        if TRAIN_OBJ_MASKING:
+                            mid_block_res_sample = mask_block(mask, mid_block_res_sample)
+                            down_block_res_samples = [mask_block(mask, block) for block in down_block_res_samples]
                         noisy_latents_model_input = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
 
                     # Predict the noise residual
@@ -525,11 +545,6 @@ class Trainer():
                         down_block_additional_residuals=[sample.to(dtype=self.weight_dtype) for sample in down_block_res_samples],
                         mid_block_additional_residual=mid_block_res_sample.to(dtype=self.weight_dtype),
                     ).sample
-
-                    # perform guidance
-                    if self.do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                     # Get the target for loss depending on the prediction type
                     if self.noise_scheduler.config.prediction_type == "epsilon":
@@ -578,7 +593,7 @@ class Trainer():
                             logger.info(f"Saved state to {save_path}")
 
                         if args.validation_file is not None and self.global_step % args.validation_steps == 0:
-                            log_validation(self.vae, self.text_encoder, self.tokenizer, self.unet, self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
+                            log_validation(self.vae, self.text_encoder, self.controlnet_text_encoder, self.controlnet_image_encoder, self.tokenizer, self.unet, self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
 
                 logs = {"loss": loss.detach().item(), "lr": self.lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)

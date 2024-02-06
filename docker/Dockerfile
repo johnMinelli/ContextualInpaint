@@ -1,9 +1,8 @@
-FROM nvidia/cuda:11.1.1-cudnn8-devel-ubuntu18.04
+FROM nvidia/cuda:11.3.1-cudnn8-devel-ubuntu20.04
 # use an older system (18.04) to avoid opencv incompatibility (issue#3524)
 
 ENV DEBIAN_FRONTEND noninteractive
-RUN apt-get update && apt-get install -y \
-	python3-opencv ca-certificates python3-dev git wget sudo ninja-build
+RUN apt-get update && apt-get install -y python3-opencv ca-certificates python3-dev python3-pip git wget sudo ninja-build curl
 RUN ln -sv /usr/bin/python3 /usr/bin/python
 
 # create a non-root user
@@ -14,14 +13,11 @@ USER appuser
 WORKDIR /home/appuser
 
 ENV PATH="/home/appuser/.local/bin:${PATH}"
-RUN wget https://bootstrap.pypa.io/pip/3.6/get-pip.py && \
-	python3 get-pip.py --user && \
-	rm get-pip.py
 
 # install dependencies
 # See https://pytorch.org/ for other options if you use a different version of CUDA
 RUN pip install --user tensorboard cmake onnx   # cmake from apt-get is too old
-RUN pip install --user torch==1.10 torchvision==0.11.1 -f https://download.pytorch.org/whl/cu111/torch_stable.html
+RUN pip3 install torch==1.10.0+cu113 torchvision==0.11.1+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
 
 RUN pip install --user 'git+https://github.com/facebookresearch/fvcore'
 # install detectron2
@@ -34,13 +30,14 @@ ARG TORCH_CUDA_ARCH_LIST="Kepler;Kepler+Tesla;Maxwell;Maxwell+Tegra;Pascal;Volta
 ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
 
 RUN pip install --user -e detectron2_repo
+RUN pip install numpy==1.20 jinja2
 
 # Set a fixed model cache directory.
 ENV FVCORE_CACHE="/tmp"
 
 RUN git clone https://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@github.com/johnMinelli/ContextualInpaint.git
 
-WORKDIR /home/appuser/ContextualInpaint/preprocessor
+WORKDIR /home/appuser/ContextualInpaint/preprocess
 
-RUN python detectron.py --action mask --input_path /mounted_input --output_path /mounted_output  
-RUN python detectron.py --action poses --input_path /mounted_input --output_path /mounted_output
+# python preprocess.py --action mask --input_path /mounted_input --output_path /mounted_output  
+# python preprocess.py --action poses --input_path /mounted_input --output_path /mounted_output
