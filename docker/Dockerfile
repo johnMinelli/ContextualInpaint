@@ -35,7 +35,7 @@ RUN pip install numpy==1.20 jinja2
 # Set a fixed model cache directory.
 ENV FVCORE_CACHE="/tmp"
 
-RUN git clone https://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@github.com/johnMinelli/ContextualInpaint.git
+RUN git clone https://github.com/johnMinelli/ContextualInpaint.git
 
 WORKDIR /home/appuser/ContextualInpaint/preprocess
 
