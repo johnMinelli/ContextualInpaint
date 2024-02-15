@@ -18,12 +18,11 @@ from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
-from jinja2.nodes import Output
-from pyasn1_modules.rfc2315 import Data
 from tqdm import tqdm
 from sys import platform
 
-from utils.utils import not_image
+def not_image(filename: str):
+    return not filename.lower().endswith(".jpeg") and not filename.lower().endswith(".jpg") and not filename.lower().endswith(".png")
 
 # from densepose import add_densepose_config
 # from detectron2.projects.DensePose.apply_net import ShowAction
