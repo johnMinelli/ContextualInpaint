@@ -22,7 +22,6 @@ from jinja2.nodes import Output
 from pyasn1_modules.rfc2315 import Data
 from tqdm import tqdm
 from sys import platform
-from transformers import pipeline
 
 from utils.utils import not_image
 
@@ -316,6 +315,8 @@ def create_prompt_llava(args: argparse.Namespace):
                         outfile.write('\n')
 
 def create_prompt_blip(args: argparse.Namespace):
+    from transformers import pipeline
+
     root = args.get("output_path", DATA_PATH)
 
     conditioning_dir = os.path.join(root, "poses")
