@@ -1,13 +1,13 @@
 import inspect
 from builtins import tuple
-from typing import Union, List, Optional, Callable, Dict, Any, Tuple
+from typing import Union, List, Optional, Callable, Dict, Any, Tuple, Iterable
 
 import matplotlib.pyplot as plt
-import numpy
 import numpy as np
 import PIL.Image
 import torch
 import torch.nn.functional as F
+from torch.utils import checkpoint
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, \
     CLIPTextModelWithProjection, CLIPVisionConfig
 
@@ -335,7 +335,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             batch_size = prompt_embeds.shape[0]
 
         # textual inversion: process multi-vector tokens if necessary
-        if isinstance(self, TextualInversionLoaderMixin):
+        if isinstance(self, TextualInversionLoaderMixin) and prompt is not None:
             prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
 
         if encoder.config_class == CLIPVisionConfig:
@@ -346,7 +346,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             if prompt_embeds is None:
                 prompt_embeds, tokenized_length = self._get_text_embeddings(prompt, encoder, self.tokenizer.model_max_length, device=device, dtype=dtype)
             else:
-                tokenized_length = self.tokenizer(prompt, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_length=True, return_tensors="pt").length
+                tokenized_length = self.tokenizer(prompt if prompt is not None else "", padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_length=True, return_tensors="pt").length
             tokenized_length = tokenized_length.repeat_interleave(num_images_per_prompt, 0)
 
         prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt,0)
@@ -479,11 +479,13 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 )
 
         # Check `controlnet_prompt`
-        input_check = prompt if prompt is not None else prompt_embeds
+        batched_input = not isinstance(prompt, str)
+        # logger.info("INFO: The input provided will be considered as batched.")
+        input_batch_size = (len(prompt) if isinstance(prompt, list) else 1) if prompt is not None else len(prompt_embeds)
         if self.controlnet is not None and controlnet_prompt is None:
-            logger.warning("The passed `prompt` will be used fixed across the controlnet(s) since `controlnet_prompt` is None.")
-        if isinstance(input_check, list):  # batched input
-            if not isinstance(controlnet_prompt, list) or (len(controlnet_prompt) != len(input_check)):
+            raise ValueError("The field `controlnet` is not None but no `controlnet_prompt` has been specified.")
+        if batched_input:  # batched input
+            if not isinstance(controlnet_prompt, list) or (len(controlnet_prompt) != input_batch_size):
                 raise ValueError(f"The batched controlnet prompt do not match with the batch size.")
             elif (isinstance(self.controlnet, MultiControlNetModel) and any([len(controlnet_prompt_) != len(self.controlnet.nets) for controlnet_prompt_ in controlnet_prompt])) \
                     or (isinstance(self.controlnet, ControlNetModel) and any([not isinstance(controlnet_prompt_, str) for controlnet_prompt_ in controlnet_prompt])):
@@ -505,7 +507,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 " only forward one of the two."
             )
         if focus_prompt is not None:
-            if isinstance(input_check, list):  # batched input
+            if input_batch_size>1:  # batched input
                 if any([not isinstance(focus_prompt_, str) for focus_prompt_ in focus_prompt]) and not all([isinstance(focus_prompt_, list) for focus_prompt_ in focus_prompt]):
                     raise ValueError("Cannot forward mixed types of `focus_prompt`. Only strings or lists of strings are accepted.")
                 if isinstance(focus_prompt[0], list) and any([not all([isinstance(focus_prompt__, str) for focus_prompt__ in focus_prompt_]) for focus_prompt_ in focus_prompt]):
@@ -518,16 +520,16 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         if (isinstance(self.controlnet, ControlNetModel) or is_compiled and isinstance(self.controlnet._orig_mod, ControlNetModel)):
             self.check_image(image, prompt, prompt_embeds)
         elif (isinstance(self.controlnet, MultiControlNetModel) or is_compiled and isinstance(self.controlnet._orig_mod, MultiControlNetModel)):
-            if isinstance(input_check, list):  # batched input
-                if not isinstance(image, list) or len(image) != len(input_check):
+            if batched_input:  # batched input
+                if not isinstance(image, Iterable) or len(image) != input_batch_size:
                     raise ValueError(f"The batched controlnet conditioning do not match with the batch size.")
-                elif not all([isinstance(image_, list) for image_ in image]):
+                elif not all([isinstance(image_, Iterable) for image_ in image]):
                     raise TypeError("For multiple controlnets: `conditioning_image` must be type `list`.")
                 elif any([len(image_) != len(self.controlnet.nets) for image_ in image]):
                     raise ValueError(f"You have {len(self.controlnet.nets)} ControlNets but you have passed "
                                      f"a sample with invalid number of `conditioning_image`.")
             else:
-                if not isinstance(image, list):
+                if not isinstance(image, Iterable):
                     raise TypeError("For multiple controlnets: `conditioning_image` must be type `list`.")
                 elif len(image) != len(self.controlnet.nets):
                     raise ValueError(f"You have {len(self.controlnet.nets)} ControlNets but you have passed "
@@ -536,28 +538,26 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     self.check_image(image_, prompt, prompt_embeds)
 
         if mask is not None:
-            if not isinstance(mask, PIL.Image.Image) and not isinstance(mask, torch.Tensor) and not isinstance(mask, np.ndarray):
-                if not isinstance(mask, list) or not all([isinstance(mask_, PIL.Image.Image) or isinstance(mask_, torch.Tensor) or isinstance(mask_, np.ndarray) for mask_ in mask]):
-                    raise TypeError("`mask` can only be one of PIL.Image.Image, torch.Tensor or numpy.array.")
-            if isinstance(input_check, list):  # batched input
-                if (isinstance(mask, PIL.Image.Image) and len(input_check)>1) or (isinstance(mask, list) and len(mask) != len(input_check)) or ((isinstance(mask, torch.Tensor) or isinstance(mask, np.ndarray)) and mask.shape[0] != len(input_check)):
-                    if not len(input_check) % (1 if isinstance(mask, PIL.Image.Image) else len(mask) if isinstance(mask, list) else mask.shape[0]) == 0:
-                        raise ValueError(
-                            "The passed mask and the required batch size don't match. Masks are supposed to be duplicated to"
-                            f" a total batch size of {len(input_check)}. Make sure the number of masks that you pass"
-                            " is divisible by the total requested batch size."
-                        )
-                    logger.warning("WARN: The passed mask and the required batch size don't match, but it will be replicated across the batches.")
+            if not isinstance(mask, PIL.Image.Image) and (not isinstance(mask, Iterable) or (isinstance(mask, Iterable) and not all([isinstance(mask_, PIL.Image.Image) or isinstance(mask_, Iterable) for mask_ in mask]))):
+                raise TypeError("`mask` can only be one of PIL.Image.Image, torch.Tensor or numpy.array.")
+            if (isinstance(mask, PIL.Image.Image) and input_batch_size>1) or (isinstance(mask, Iterable) and len(mask) != input_batch_size):
+                if not input_batch_size % (1 if isinstance(mask, PIL.Image.Image) else len(mask)) == 0:
+                    raise ValueError(
+                        "The passed mask and the required batch size don't match. Masks are supposed to be duplicated to"
+                        f" a total batch size of {input_batch_size}. Make sure the number of masks that you pass"
+                        " is divisible by the total requested batch size."
+                    )
+                logger.warning("WARN: The passed mask and the required batch size don't match, but it will be replicated across the batches.")
 
         # Check `controlnet_conditioning_scale`
         if (isinstance(self.controlnet, ControlNetModel) or is_compiled and isinstance(self.controlnet._orig_mod, ControlNetModel)):
             if not isinstance(controlnet_conditioning_scale, float):
                 raise TypeError("For single controlnet: `controlnet_conditioning_scale` must be type `float`.")
         elif (isinstance(self.controlnet, MultiControlNetModel) or is_compiled and isinstance(self.controlnet._orig_mod, MultiControlNetModel)):
-            if isinstance(controlnet_conditioning_scale, list):
+            if isinstance(controlnet_conditioning_scale, Iterable):
                 if any(isinstance(i, list) for i in controlnet_conditioning_scale):
                     raise ValueError("A single batch of multiple conditionings are supported at the moment.")
-            elif isinstance(controlnet_conditioning_scale, list) and len(controlnet_conditioning_scale) != len(self.controlnet.nets):
+            elif isinstance(controlnet_conditioning_scale, Iterable) and len(controlnet_conditioning_scale) != len(self.controlnet.nets):
                 raise ValueError(
                     "For multiple controlnets: When `controlnet_conditioning_scale` is specified as `list`, it must have"
                     " the same length as the number of controlnets"
@@ -590,10 +590,10 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             if end > 1.0:
                 raise ValueError(f"control guidance end: {end} can't be larger than 1.0.")
 
-        if generator is not None and isinstance(generator, list) and len(generator) != len(input_check):
+        if generator is not None and isinstance(generator, list) and len(generator) != input_batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                f" size of {len(input_check)}. Make sure the batch size matches the length of the generators."
+                f" size of {input_batch_size}. Make sure the batch size matches the length of the generators."
             )
 
     def check_image(self, image, prompt, prompt_embeds):
@@ -835,6 +835,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         control_guidance_end: Union[float, List[float]] = 1.0,
         focus_prompt: Optional[List[str]] = None,
         focus_prompt_embeds = None,
+        gradient_checkpointing: bool = False,
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
@@ -984,7 +985,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             batch_size = prompt_embeds.shape[0]
         if negative_prompt is not None and isinstance(negative_prompt, str):
             negative_prompt = [negative_prompt]
-        if controlnet_prompt is not None and isinstance(negative_prompt, str):
+        if controlnet_prompt is not None and isinstance(controlnet_prompt, str):
             controlnet_prompt = [controlnet_prompt]
 
         device = self._execution_device
@@ -1041,7 +1042,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             lora_scale=text_encoder_lora_scale,
             clip_skip=self.clip_skip,
             return_tuple=False
-        )  # (cfg*b*p*n,seq,hid)
+        )  # (cfg*b*1*n,seq,hid)
         
         if controlnet is not None:
             encoder = self.controlnet_text_encoder if self.controlnet_text_encoder is not None else \
@@ -1086,16 +1087,19 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 return_tuple=False
             )  # (1*b*fp*n,seq,hid)
             # list of prompts in one batch for which the cross attention is stored by the AttentionStore (debug helper)
-            prompts_per_batch = ([prompt] if isinstance(prompt, str) else [prompt[0]]) + ([focus_prompt] if isinstance(focus_prompt, str) else focus_prompt[:self.num_focus_prompts])
+            prompts_per_batch = ([prompt] if isinstance(prompt, str) else [prompt[0]] if isinstance(prompt, list) else [None]) + ([focus_prompt] if isinstance(focus_prompt, str) else focus_prompt[:self.num_focus_prompts])
             # embeds to feed the unet
-            prompt_embeds = torch.cat([prompt_embeds, focus_prompt_embeds], 0)
+            prompt_embeds = torch.cat([prompt_embeds, focus_prompt_embeds], 0)  # ([(cfg*b*1*n)+(1*b*fp*n)],seq,hid) 
 
         # 4. Prepare image
         if controlnet is not None:
             # flatten (batches, multi controlnet conditioning)
             nets = len(self.controlnet.nets) if isinstance(self.controlnet, MultiControlNetModel) else 1
-            if batch_size > 1 and nets > 1:
-                conditioning_image = [p for batch in conditioning_image for p in batch]
+            if batch_size > 1 or nets > 1:
+                if isinstance(conditioning_image, torch.Tensor):
+                    conditioning_image = [el for el in conditioning_image]  # either you end up with chw, bchw or nchw is fine for the preprocessor  
+                elif isinstance(conditioning_image, list) and isinstance(conditioning_image[0], list):
+                    conditioning_image = [image for batch in conditioning_image for image in batch]
             conditioning_image = self.conditioning_image_processor.preprocess(conditioning_image, height=height, width=width)
             conditioning_image = self.prepare_conditioning_image(
                 image=conditioning_image,
@@ -1112,7 +1116,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             mask_image = None
         else:
             init_image = self.image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
-            # repeat for the batch if needed 
+            # repeat for the batch if needed
             init_image = init_image.repeat(batch_size // init_image.shape[0], 1, 1, 1)  # (b,c,h,w)
             if mask_image is not None:
                 # Prepare mask latent
@@ -1200,7 +1204,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 latent_model_input = torch.cat([noisy_latents] * (1+int(do_classifier_free_guidance)+self.num_focus_prompts))  # ((fp+cfg)*b*n,c_vae,h_vae,w_vae)
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # NOTE: for inpainting, use the latent filling option you prefer:
+                # NOTE: for inpainting, in the masked area of the rgb image use the latent filling option you prefer:
                 #   fill: default
                 #   original: latent_model_input[mask.expand(latent_model_input.shape) > 0.5] = torch.mean(latent_model_input[mask.expand(latent_model_input.shape) > 0.5])
                 #   latent nothing: latent_model_input[mask.expand(latent_model_input.shape) > 0.5] = torch.randn_like(latent_model_input)[mask.expand(latent_model_input.shape) > 0.5]
@@ -1245,16 +1249,22 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     # Full inpaint: feed SD with [image, mask and masked image] to let the model predict noise conscious of the inpainting process
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)  # ((fp+cfg)*b*n,(c_vae+c+c_vae),h_vae,w_vae)
 
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    down_block_additional_residuals=down_block_res_samples if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*) 
-                    mid_block_additional_residual=mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
-                    return_dict=False,
-                )[0]
+                if gradient_checkpointing:
+                    noise_pred = checkpoint.checkpoint(self.unet,
+                    latent_model_input, t, prompt_embeds, None, timestep_cond, None, self.cross_attention_kwargs, None, 
+                           [d.detach() for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
+                           mid_block_res_sample.detach() if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None, None, None, False)[0]
+                else:
+                    noise_pred = self.unet(
+                        sample=latent_model_input,
+                        timestep=t,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep_cond=timestep_cond,
+                        cross_attention_kwargs=self.cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*) 
+                        mid_block_additional_residual=mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
+                        return_dict=False,
+                    )[0]
 
                 # split guidance and focus prompts
                 noise_pred = noise_pred.chunk(1 + int(do_classifier_free_guidance) + self.num_focus_prompts)
@@ -1326,6 +1336,10 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
         if output_type == "latent":
             image = latents
+            has_nsfw_concept = None
+        elif output_type == "pt":
+            image = self._decode_vae_latents(latents)
+            image = self.image_processor.postprocess(image, output_type="pt")
             has_nsfw_concept = None
         elif output_type == "pil":
             # 8. Post-processing

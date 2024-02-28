@@ -61,12 +61,12 @@ def clean_preprocessed_data(args):
                     rgb_im = cv2.resize(rgb_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
                     pose_im = cv2.resize(pose_im, (512, 512))
-                    # dilate mask and apply
-                    bool_mask = cv2.dilate((mask_im>50).astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
-                    rgb_im[bool_mask] = 0
-                    pose_im[~bool_mask] = 0
-                    mask_im = np.zeros_like(rgb_im)
-                    mask_im[bool_mask] = 255
+                    # # dilate mask and apply
+                    # bool_mask = cv2.dilate((mask_im>50).astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
+                    # rgb_im[bool_mask] = 0
+                    # pose_im[~bool_mask] = 0
+                    # mask_im = np.zeros_like(rgb_im)
+                    # mask_im[bool_mask] = 255
                     # save
                     cv2.imwrite(rgb_path, rgb_im)
                     cv2.imwrite(mask_path, mask_im)

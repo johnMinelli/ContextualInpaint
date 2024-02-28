@@ -79,11 +79,12 @@ for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt 
 
     images = []
     for _ in range(args.num_validation_images):
-        with torch.autocast(f"cuda"):
-            pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt,
-                                  image=image, mask_image=mask, conditioning_image=[mask_conditioning]*len(controlnet) if type(controlnet)==list else mask_conditioning, height=512, width=512,
-                                  strength=1.0, controlnet_conditioning_scale=1., num_inference_steps=50, guidance_scale=9, guess_mode=True, generator=generator).images[0]
-        images.append(pred_image)
+        with torch.no_grad():
+            with torch.autocast(f"cuda"):
+                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt,
+                                      image=image, mask_image=mask, conditioning_image=[mask_conditioning]*len(controlnet) if type(controlnet)==list else mask_conditioning, height=512, width=512,
+                                      strength=1.0, controlnet_conditioning_scale=1., num_inference_steps=50, guidance_scale=9, guess_mode=True, generator=generator).images[0]
+            images.append(pred_image)
 
     image_logs.append({"reference": image, "images": images, "prompt": prompt})
 

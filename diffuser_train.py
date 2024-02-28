@@ -61,11 +61,11 @@ from utils.utils import import_text_encoder_from_model_name_or_path, replicate, 
 
 if is_wandb_available():
     import wandb
-    wandb.init(project="train_controlnet", resume="gjn070jq")
+    # wandb.init(project="train_controlnet", resume="goirmfze")
 
 
 logger = get_logger(__name__)
-TRAIN_OBJ_MASKING = False
+TRAIN_OBJ_MASKING = True
 
 def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
@@ -113,22 +113,23 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
     focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
 
     image_logs = []
-    for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts):
+    for prompt, neg_prompt, image, mask, condition, control_prompt, focus_prompt in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts):
         image = Image.open(image).convert("RGB") if image is not None else None
         mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
         mask = Image.open(mask).convert("L") if mask is not None else None
-        conditioning = Image.open(conditioning).convert("RGB") if conditioning is not None else None
+        condition = Image.open(condition).convert("RGB") if condition is not None else None
         focus_prompt = [focus_prompt] if focus_prompt else None
 
-        images = []
-        for i in range(args.num_validation_images):
-            with torch.autocast(f"cuda"):
-                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
-                                      image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
-                                      strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
-            images.append(pred_image)
-
-        image_logs.append({"reference": image, "images": images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
+        with torch.no_grad():
+            pred_images = []
+            for i in range(args.num_validation_images):
+                    with torch.autocast(f"cuda"):
+                        pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
+                                              image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
+                                              strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
+                    pred_images.append(pred_image)
+    
+            image_logs.append({"reference": image, "images": pred_images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
 
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
@@ -230,8 +231,8 @@ class Trainer():
         else:
             logger.info("Initializing controlnet weights from unet")
             net_for_w = copy.deepcopy(self.unet)
-            if self.unet.config.in_channels != 4:  # NOTE: hardcoded init with sd2.0 weights
-                net_for_w.conv_in = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-2-base", subfolder="unet",revision=args.revision).conv_in
+            if self.unet.config.in_channels != 4:
+                net_for_w.conv_in.weight = torch.nn.Parameter(self.unet.conv_in.weight[:,:4])
                 net_for_w.config.in_channels = 4
             self.controlnet = ControlNetModel.from_unet(net_for_w)
 
@@ -505,10 +506,10 @@ class Trainer():
                     if mask is not None:
                         masked_image = image.clone()
                         masked_image[mask.expand(image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
-                        mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, bs*1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
+                        mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, 1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
 
                     # Control Image
-                    conditioning_image = self.pipe_utils.prepare_conditioning_image(conditioning_image, bs*1, 1, self.accelerator.device, self.weight_dtype, do_classifier_free_guidance=False)
+                    conditioning_image = self.pipe_utils.prepare_conditioning_image(conditioning_image, 1, self.accelerator.device, self.weight_dtype, do_classifier_free_guidance=False)
 
                     # Prompt to embeddings
                     assert (not TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]=="") or (TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]!=""), "ERR: TRAIN_OBJ_MASKING is False/True but `ctrl_txt_image` is/is not provided."
