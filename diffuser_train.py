@@ -211,8 +211,8 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = DiffuserDataset(args, self.tokenizer)
-        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
+        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer) for data_dir in args.train_data_dir]
+        self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
 
         # import correct text encoder class
         text_encoder_cls = import_text_encoder_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
@@ -516,7 +516,7 @@ class Trainer():
 
                     flag_image_as_hid_prompt = (np.random.random() > 0.5) if TRAIN_OBJ_MASKING else False
 
-                    encoder, ctrl_prompt = (self.controlnet_image_encoder, [os.path.join(args.train_data_dir, p) for p in batch["ctrl_txt_image"]]) \
+                    encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) \
                         if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
                     encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
                     encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)

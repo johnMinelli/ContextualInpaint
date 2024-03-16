@@ -2,30 +2,21 @@ import argparse
 import json
 import os
 import warnings
-from dataclasses import dataclass
-
 
 import cv2
 import matplotlib.pyplot as plt
 
-import detectron2
 import numpy as np
-import torch
-import sys
-from PIL import Image
 from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from tqdm import tqdm
-from sys import platform
+
 
 def not_image(filename: str):
     return not filename.lower().endswith(".jpeg") and not filename.lower().endswith(".jpg") and not filename.lower().endswith(".png")
-
-# from densepose import add_densepose_config
-# from detectron2.projects.DensePose.apply_net import ShowAction
 
 DATA_PATH = "../data/verizon_formatted2/"
 
@@ -61,12 +52,6 @@ def clean_preprocessed_data(args):
                     rgb_im = cv2.resize(rgb_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
                     pose_im = cv2.resize(pose_im, (512, 512))
-                    # # dilate mask and apply
-                    # bool_mask = cv2.dilate((mask_im>50).astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
-                    # rgb_im[bool_mask] = 0
-                    # pose_im[~bool_mask] = 0
-                    # mask_im = np.zeros_like(rgb_im)
-                    # mask_im[bool_mask] = 255
                     # save
                     cv2.imwrite(rgb_path, rgb_im)
                     cv2.imwrite(mask_path, mask_im)
@@ -106,8 +91,7 @@ def run_masking(args: argparse.Namespace):
             if not_image(filename): continue      
 
             try:
-                rgb_im = cv2.imread(os.path.join(root, filename))
-                rgb_im = cv2.cvtColor(rgb_im, cv2.COLOR_BGR2RGB)
+                rgb_im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
@@ -152,7 +136,7 @@ def run_pose_estimation(args: argparse.Namespace):
             if not_image(filename): continue
             
             try:
-                im = cv2.imread(os.path.join(root, filename))
+                im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
@@ -176,100 +160,6 @@ def run_pose_estimation(args: argparse.Namespace):
             # Save
             plt.imsave(os.path.join(poses_folder, filename), out)
 
-def run_openpose_estimation(args: argparse.Namespace):
-    # Openpose Import (Windows/Ubuntu/OSX)
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    try:
-        # Windows Import
-        if platform == "win32":
-            # Change these variables to point to the correct folder (Release/x64 etc.)
-            sys.path.append(dir_path + '/../../python/openpose/Release');
-            os.environ['PATH'] = os.environ['PATH'] + ';' + dir_path + '/../../x64/Release;' + dir_path + '/../../bin;'
-            import pyopenpose as op
-        else:
-            # Change these variables to point to the correct folder (Release/x64 etc.)
-            sys.path.append('../../python')
-            # If you run `make install` (default path is `/usr/local/python` for Ubuntu), you can also access the OpenPose/python module from there. This will install OpenPose and the python library at your desired installation path. Ensure that this is in your python path in order to use it.
-            # sys.path.append('/usr/local/python')
-            from openpose import pyopenpose as op
-    except ImportError as e:
-        print(
-            'Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
-        raise e
-    
-    params = dict()
-    params["model_folder"] = "../../../models/"
-    params["face"] = True
-    params["hand"] = True
-    
-    opWrapper = op.WrapperPython()
-    opWrapper.configure(params)
-    opWrapper.start()
-
-
-    for root, dirs, files in os.walk(os.path.join(args.get("input_path", DATA_PATH),"target")):
-        if len(files)==0: continue
-        print("Entering:", root)
-        for filename in tqdm(files):
-            if not_image(filename): continue
-            im = cv2.imread(os.path.join(root,filename))
-            datum = op.Datum()
-            datum.cvInputData = im
-            opWrapper.emplaceAndPop(op.VectorDatum([datum]))
-        
-            source_folder = root.replace("target", "openposes")
-            if not os.path.exists(source_folder):
-                os.makedirs(source_folder)
-            # Save
-            plt.imsave(os.path.join(source_folder, filename), datum.cvOutputData)
-
-    # torch.save(poses, DATA_PATH+"poses.txt")
-
-def run_densepose_estimation(args: argparse.Namespace):
-    @dataclass
-    class DensePoseSettings:
-        visualizations: str
-        score: str
-        texture_atlas: str
-        texture_atlases_map: str
-        image_file: str
-
-    args = DensePoseSettings(visualizations="dp_u")
-    
-    cfg = get_cfg()  # get a fresh new config
-    add_densepose_config(cfg)
-
-    cfg.merge_from_file(model_zoo.get_config_file("DensePose/densepose_rcnn_R_101_FPN_s1x.yaml"))
-    cfg.MODEL.WEIGHTS = "../detectron2/models/densepose_rcnn_R_101_FPN_s1x.pkl"
-    predictor = DefaultPredictor(cfg)
-    context = ShowAction.create_context(args, cfg)
-    poses = {}
-    for root, dirs, files in os.walk(os.path.join(args.get("input_path", DATA_PATH), "target")):
-        if len(files)==0: continue
-        print("Entering:", root)
-        for filename in tqdm(files):
-            if not_image(filename): continue
-            im = cv2.imread(os.path.join(root,filename))
-            
-            
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                outputs = predictor(im)["instances"].to("cpu")
-
-            person_filter = outputs.pred_classes==0
-            outputs.pred_boxes = outputs.pred_boxes[person_filter]
-            del outputs._fields["pred_boxes"]
-            outputs.scores = outputs.scores[person_filter]
-            outputs.pred_classes = outputs.pred_classes[person_filter]
-      
-            source_folder = root.replace("target", "denseposes")
-            if not os.path.exists(source_folder):
-                os.makedirs(source_folder)
-
-            ShowAction.execute_on_outputs(context, {"file_name": os.path.join(source_folder, filename), "image": im}, outputs)
-            ShowAction.postexecute(context)
-
-    torch.save(poses, args.get("output_path", DATA_PATH), "poses.txt")
 
 def create_prompt_llava(args: argparse.Namespace):
     from llava_predictor import Predictor
@@ -347,6 +237,7 @@ def create_prompt_blip(args: argparse.Namespace):
                                   "prompt": label}
                         json.dump(line, outfile)
                         outfile.write('\n')
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()

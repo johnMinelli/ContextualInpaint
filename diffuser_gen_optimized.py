@@ -19,12 +19,12 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import CLIPTextModelWithProjection
 from diffusers import ControlNetModel, DDIMScheduler
 
-from dataset import ProcDataset, proc_collate_fn
+from dataset import ProcDataset
 from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from third.verizon.ludovicodl.nn.models.object_in_hand import get_model
 from third.verizon.ludovicodl.training.learning import MultiTask
 from utils.parser import Optim_args
-from utils.utils import not_image
+from utils.data_utils import proc_collate_fn, not_image
 from vsource.evaluation.tasks import PhoneUsageTask, CigaretteTask, FoodTask
 
 logger = get_logger(__name__)
@@ -108,7 +108,7 @@ else:
 task_to_class = {'phone_binary': ["phone"], 'cigarette_binary': ["cigarette"], 'food_binary': ["food", "drink"]}
 class_to_task = {'phone':'phone_binary', 'cigarette':'cigarette_binary', 'food':'food_binary', 'drink':'food_binary'}
 categories = {"food":0.31, "drink":0.07, "phone":0.52, "cigarette":0.10, "default":0.0}
-procedural_dataset = ProcDataset(args, categories, len(controlnet) if controlnet is not None else 0)
+procedural_dataset = ProcDataset(args.evaluation_file, args.num_validation_images, categories, len(controlnet) if controlnet is not None else 0)
 procedural_dataloader = torch.utils.data.DataLoader(procedural_dataset, shuffle=True, batch_size=args.batch_size, num_workers=args.dataloader_num_workers, collate_fn=proc_collate_fn)
 
 # Prepare everything with accelerator library

@@ -1082,7 +1082,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 False,
                 self.text_encoder,
                 num_images_per_prompt=num_images_per_prompt,
-                prompt_embeds = focus_prompt_embeds,
+                prompt_embeds=focus_prompt_embeds,
                 return_length=True,
                 return_tuple=False
             )  # (1*b*fp*n,seq,hid)
@@ -1261,8 +1261,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         encoder_hidden_states=prompt_embeds,
                         timestep_cond=timestep_cond,
                         cross_attention_kwargs=self.cross_attention_kwargs,
-                        down_block_additional_residuals=down_block_res_samples if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*) 
-                        mid_block_additional_residual=mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
+                        down_block_additional_residuals=None if controlnet is None else down_block_res_samples if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*) 
+                        mid_block_additional_residual=None if controlnet is None else mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
                         return_dict=False,
                     )[0]
 

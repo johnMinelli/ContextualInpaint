@@ -7,9 +7,6 @@ from transformers import PretrainedConfig
 import torch.nn.functional as F
 
 
-def not_image(filename: str):
-    return not filename.lower().endswith(".jpeg") and not filename.lower().endswith(".jpg") and not filename.lower().endswith(".png")
-
 def raiser(): raise ValueError(
     "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`")
 

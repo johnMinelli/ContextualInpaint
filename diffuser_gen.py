@@ -7,7 +7,8 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import CLIPTextModelWithProjection
 from diffusers import ControlNetModel, DDIMScheduler
 
-from dataset import ProcDataset, proc_collate_fn
+from dataset import ProcDataset
+from utils.data_utils import proc_collate_fn
 from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from utils.parser import Eval_args
 
@@ -59,7 +60,7 @@ else:
 # Dataset
 batch_size = 8
 categories = {"food":0.07, "drink":0.07, "phone":0.52, "cigarette":0.10, "default":0.24}
-procedural_dataset = ProcDataset(args, categories, len(controlnet) if controlnet is not None else 0)
+procedural_dataset = ProcDataset(args.evaluation_file, args.num_validation_images, categories, len(controlnet) if controlnet is not None else 0)
 procedural_dataloader = torch.utils.data.DataLoader(procedural_dataset, shuffle=True, batch_size=batch_size, num_workers=0, collate_fn=proc_collate_fn)
 
 for gen_id, batch in enumerate(procedural_dataloader):
