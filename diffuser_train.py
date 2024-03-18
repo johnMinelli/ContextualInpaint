@@ -65,7 +65,7 @@ if is_wandb_available():
 
 
 logger = get_logger(__name__)
-TRAIN_OBJ_MASKING = True
+TRAIN_OBJ_MASKING = False
 
 def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
