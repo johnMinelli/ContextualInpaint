@@ -1,10 +1,10 @@
 ﻿import torch
 
-from LLaVA.llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
-from LLaVA.llava.conversation import conv_templates, SeparatorStyle
-from LLaVA.llava.model.builder import load_pretrained_model
-from LLaVA.llava.utils import disable_torch_init
-from LLaVA.llava.mm_utils import tokenizer_image_token, KeywordsStoppingCriteria
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
+from llava.conversation import conv_templates, SeparatorStyle
+from llava.model.builder import load_pretrained_model
+from llava.utils import disable_torch_init
+from llava.mm_utils import tokenizer_image_token, KeywordsStoppingCriteria
 from transformers.generation.streamers import TextIteratorStreamer
 
 from PIL import Image

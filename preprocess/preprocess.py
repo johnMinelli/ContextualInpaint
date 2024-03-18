@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import warnings
 
 import cv2
@@ -163,45 +164,49 @@ def run_pose_estimation(args: argparse.Namespace):
 
 def create_prompt_llava(args: argparse.Namespace):
     from llava_predictor import Predictor
-    root = args.get("input_path", DATA_PATH)+"/"
+    input_folder = args.get("input_path", DATA_PATH)+"/"
+    root_out = args.get("output_path", DATA_PATH)+"/"
 
-    # TODO make it more flexible
-    assert os.path.join(root, "poses") and os.path.join(root, "mask") and os.path.join(root, "target"), "The input path provided should present folders 'target', 'source' and 'poses'"
-
-    conditioning_folder = conditioning_dir = os.path.join(root, "poses")
-    mask_folder = mask_dir = os.path.join(root, "mask")
-    target_folder = target_dir = os.path.join(root, "target")
+    conditioning_folder = conditioning_dir = os.path.join(root_out, "poses")
+    mask_folder = mask_dir = os.path.join(root_out, "mask")
+    target_folder = target_dir = os.path.join(root_out, "target")
+    if not os.path.exists(target_folder):
+        os.makedirs(target_folder)
+    
     pred = Predictor()
     pred.setup()
     query = "follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
     query = 'Provide as output ONLY THE BESTS label for the image choosing the list one of the following: "phone", "driver distracted", "driver drowsy", "driver attentive", "food or drink", "cigarette". "cigarette"=person interacting with a cigarette. "food or drink"=person interacting with foods or drinks. "phone"=person interacting with a phone. "driver attentive"=person focused watching forward with open eyes. "driver drowsy"= person with eyes closed or yawning (if drowsy not attentive or distracted). "driver distracted"=person not watching forward, or engaged in other activities, such as using a phone, eating, or smoking (if distracted not attentive or drowsy)'
     query = "provide a COMPACT and OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out is visible, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed"
 
-    with open(os.path.join(root, 'prompt.json'), 'w') as outfile:
+    with open(os.path.join(root_out, 'prompt.json'), 'w') as outfile:
         # for folder_name in os.listdir(target_dir):
             # conditioning_folder = os.path.join(conditioning_dir, folder_name)
             # mask_folder = os.path.join(mask_dir, folder_name)
             # target_folder = os.path.join(target_dir, folder_name)
-            # 
-            # if os.path.isdir(conditioning_folder) and os.path.isdir(target_folder):
-                print("Entering:", target_folder)
-                for filename in tqdm(os.listdir(target_folder)):
+                print("Entering:", input_folder)
+                for filename in tqdm(os.listdir(input_folder)):
                     if not_image(filename): continue
+                    input_file = os.path.join(input_folder, filename)
                     conditioning_file = os.path.join(conditioning_folder, filename)
                     mask_file = os.path.join(mask_folder, filename)
                     target_file = os.path.join(target_folder, filename)
-        
-                    if os.path.isfile(conditioning_file) and os.path.isfile(target_file):
-                        label = pred.predict(target_file, query, 0.7, 0.2, 512)
+
+                    if os.path.isfile(input_file):
+                        if input_file != target_file:
+                            shutil.copyfile(input_file, target_file)
+
+                        label = pred.predict(input_file, query, 0.7, 0.2, 512)
                         label = (label[:-1] if label.endswith('.') else label).replace("\"", "").replace("'", "")
                         line = {
-                            "conditioning": conditioning_file.replace(root,""),
-                            "mask": mask_file.replace(root,""),
-                            "target": target_file.replace(root,""),
+                            "conditioning": conditioning_file.replace(root_out,""),
+                            "mask": mask_file.replace(root_out,""),
+                            "target": target_file.replace(root_out,""),
                             "prompt": label
                         }
                         json.dump(line, outfile)
                         outfile.write('\n')
+
 
 def create_prompt_blip(args: argparse.Namespace):
     from transformers import pipeline
