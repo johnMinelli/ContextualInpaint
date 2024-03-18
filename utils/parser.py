@@ -20,7 +20,7 @@ class Train_args:
                 "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
                 "Using a checkpoint for inference requires separate loading of the original pipeline and the individual checkpointed model components."
                 "See https://huggingface.co/docs/diffusers/main/en/training/dreambooth#performing-inference-using-a-saved-checkpoint for step by step instructions."),)
-        self.parser.add_argument("--checkpoints_total_limit", type=int, default=2, help=("Max number of checkpoints to store."),)
+        self.parser.add_argument("--checkpoints_total_limit", type=int, default=5, help=("Max number of checkpoints to store."),)
         self.parser.add_argument("--resume", type=str, default=None, help=("Whether training should be resumed from a previous checkpoint. Use a path saved by `--checkpointing_steps`, or `latest` to automatically select the last available checkpoint."),)
         self.parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.",)
         self.parser.add_argument("--gradient_checkpointing", action="store_true", help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",)
@@ -63,7 +63,7 @@ class Train_args:
         self.parser.add_argument("--proportion_empty_prompts", type=float, default=0, help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).")
         self.parser.add_argument("--validation_file", type=str, default="data/validation/validation.json", help="A json file detailing the files for validation which happens every `--validation_steps` and logged to `--log`.")
         self.parser.add_argument("--num_validation_images", type=int, default=4, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",)
-        self.parser.add_argument("--validation_steps", type=int, default=250, help="Run validation every X steps. Validation consists of running the prompt `args.validation_prompt` multiple times: `args.num_validation_images` and logging the images.")
+        self.parser.add_argument("--validation_steps", type=int, default=200000000, help="Run validation every X steps. Validation consists of running the prompt `args.validation_prompt` multiple times: `args.num_validation_images` and logging the images.")
         self.parser.add_argument("--tracker_project_name", type=str, default="train_controlnet", help="The `project_name` argument passed to Accelerator.init_trackers for more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator")
 
     def parse_args(self, input_args=None):
@@ -153,7 +153,7 @@ class Optim_args:
         self.parser.add_argument("--validation_steps", type=int, default=250, help="Run validation every X steps. Validation consists of running the prompt `args.validation_prompt` multiple times: `args.num_validation_images` and logging the images.")
         self.parser.add_argument("--tracker_project_name", type=str, default="train_controlnet", help="The `project_name` argument passed to Accelerator.init_trackers for more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator")
         self.parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the generator dataloader.")
-        self.parser.add_argument("--learning_rate", type=float, default=5e-6, help="Initial learning rate (after the potential warmup period) to use.",)
+        self.parser.add_argument("--learning_rate", type=float, default=1e-5, help="Initial learning rate (after the potential warmup period) to use.",)
         self.parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
         self.parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
         self.parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
