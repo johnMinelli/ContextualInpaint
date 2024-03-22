@@ -74,12 +74,13 @@ def run_masking(args: argparse.Namespace):
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     predictor = DefaultPredictor(cfg)
     dil_kernel = np.ones((7, 7), np.uint8)  # Adjust the kernel size according to your requirements
-    if not os.path.exists("sam_vit_h_4b8939.pth"):
-        print("Download SAM model.")
+    sam_model_path = os.path.join(os.getenv("HF_HUB_CACHE", "."), 'sam_vit_h_4b8939.pth')
+    if not os.path.exists(sam_model_path):
+        print("Download SAM model...")
         r = requests.get('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', allow_redirects=True)
-        open(os.path.join(os.getenv("HF_HUB_CACHE", "."), 'sam_vit_h_4b8939.pth'), 'wb').write(r.content)
+        open(sam_model_path, 'wb').write(r.content)
     else: print("Using SAM model cached.")
-    sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h_4b8939.pth").to(device=torch.device('cuda:0'))
+    sam = sam_model_registry["vit_h"](checkpoint=sam_model_path).to(device=torch.device('cuda:0'))
     mask_predictor = SamPredictor(sam)
     # Create output folder if not exist
     source_folder = os.path.join(args.get("output_path", DATA_PATH), "source")
