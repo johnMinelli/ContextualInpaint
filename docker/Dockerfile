@@ -16,7 +16,7 @@ ENV PATH="/home/appuser/.local/bin:${PATH}"
 
 # install dependencies
 # See https://pytorch.org/ for other options if you use a different version of CUDA
-RUN pip install --user tensorboard cmake onnx   # cmake from apt-get is too old
+RUN pip install --user tensorboard cmake onnx matplotlib  # cmake from apt-get is too old
 RUN pip3 install torch==1.10.0+cu113 torchvision==0.11.1+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
 
 RUN pip install --user 'git+https://github.com/facebookresearch/fvcore'
@@ -35,7 +35,14 @@ RUN pip install numpy==1.20 jinja2
 # Set a fixed model cache directory.
 ENV FVCORE_CACHE="/tmp"
 
-RUN git clone https://github.com/johnMinelli/ContextualInpaint.git
+RUN git clone --branch v1.1.3 https://github.com/haotian-liu/LLaVA.git LLaVA_repo
+RUN python -m pip install --upgrade pip
+RUN pip install -e LLaVA_repo
+RUN pip install cog
+
+RUN pip install git+https://github.com/facebookresearch/segment-anything.git
+
+RUN git clone https://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@github.com/johnMinelli/ContextualInpaint.git
 
 WORKDIR /home/appuser/ContextualInpaint/preprocess
 

@@ -3,18 +3,20 @@ import json
 import os
 import shutil
 import warnings
+import requests
 
 import cv2
 import matplotlib.pyplot as plt
 
 import numpy as np
+import torch
 from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from tqdm import tqdm
-
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 
 def not_image(filename: str):
     return not filename.lower().endswith(".jpeg") and not filename.lower().endswith(".jpg") and not filename.lower().endswith(".png")
@@ -72,7 +74,13 @@ def run_masking(args: argparse.Namespace):
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     predictor = DefaultPredictor(cfg)
     dil_kernel = np.ones((7, 7), np.uint8)  # Adjust the kernel size according to your requirements
-
+    if not os.path.exists("sam_vit_h_4b8939.pth"):
+        print("Download SAM model.")
+        r = requests.get('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', allow_redirects=True)
+        open(os.path.join(os.getenv("HF_HUB_CACHE", "."), 'sam_vit_h_4b8939.pth'), 'wb').write(r.content)
+    else: print("Using SAM model cached.")
+    sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h_4b8939.pth").to(device=torch.device('cuda:0'))
+    mask_predictor = SamPredictor(sam)
     # Create output folder if not exist
     source_folder = os.path.join(args.get("output_path", DATA_PATH), "source")
     mask_folder = os.path.join(args.get("output_path", DATA_PATH), "mask")
@@ -97,18 +105,25 @@ def run_masking(args: argparse.Namespace):
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
             outputs = predictor(rgb_im)
+            person_filter = outputs["instances"].pred_classes==0
+            # detectron masks
+            pred_masks = outputs["instances"].pred_masks[person_filter]
+            # SAM masks
+            transformed_boxes = mask_predictor.transform.apply_boxes_torch(outputs["instances"].pred_boxes[person_filter].tensor, rgb_im.shape[:2])
+            mask_predictor.set_image(rgb_im)
+            pred_masks = mask_predictor.predict_torch(boxes=transformed_boxes, multimask_output=False, point_coords=None, point_labels=None)[0][:,0]  # masks, scores, logits
+            # combine masks and dilate
+            pred_mask_bool = pred_masks.sum(0).bool().cpu()
+            pred_mask_bool = cv2.dilate(pred_mask_bool.numpy().astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
+            
             # v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
             # out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
             # plt.imshow(pred_masks)
             # plt.show()
-            person_filter = outputs["instances"].pred_classes==0
-            pred_masks = outputs["instances"].pred_masks[person_filter].cpu()
-            pred_mask_bool = pred_masks.sum(0).bool()
-            pred_mask_bool = cv2.dilate(pred_mask_bool.numpy().astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
 
             rgb_im[pred_mask_bool] = [0, 0, 0]
-            mask_im = np.zeros_like(rgb_im)
-            mask_im[pred_mask_bool] = [255, 255, 255]
+            mask_im = np.zeros(rgb_im.shape[:2])
+            mask_im[pred_mask_bool] = 255
 
             # Save
             plt.imsave(os.path.join(source_folder, filename), rgb_im)

@@ -1,7 +1,9 @@
 ﻿import random
 
+import PIL
 import cv2
 import numpy as np
+from PIL import Image
 
 
 def not_image(filename: str):
@@ -53,20 +55,23 @@ def apply_additional_patches(mask, num_patches, contour):
     return mask
 
 
-def mask_augmentation(mask_image):
+def mask_augmentation(mask_image, expansion_p=1, patch_p=1, min_expansion_factor=1, max_expansion_factor=1.6, patches=3):
+    mask = np.array(mask_image) if isinstance(mask_image, PIL.Image.Image) else mask_image
+
     # Apply image segmentation to isolate the mask
-    _, mask = cv2.threshold(mask_image, 127, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contour = random.choice(contours)
+    contour = max(contours, key=cv2.contourArea)
 
     # Randomly expand the contour
-    if random.random() < 0.8:
-        expansion_factor = random.uniform(1.1, 1.5)
+    if random.random() < expansion_p:
+        expansion_factor = random.uniform(min_expansion_factor, max_expansion_factor)
         expanded_contour = expand_contour(contour, expansion_factor)
         mask = cv2.drawContours(mask, [expanded_contour], 0, 255, -1)
     # Randomly apply additional patches
-    if random.random() < 0.5:
-        num_patches = random.randint(1, 3)
+    if random.random() < patch_p:
+        num_patches = random.randint(1, patches)
         mask = apply_additional_patches(mask, num_patches, contour)
 
+    mask = Image.fromarray(mask) if isinstance(mask_image, PIL.Image.Image) else mask
     return mask

@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 
 class DiffuserDataset(Dataset):
+    """ Dataset for training and validation. """
     def __init__(self, data_dir, resolution=512, tokenizer=None):
         self.data_dir = data_dir
         self.resolution = resolution
@@ -101,6 +102,7 @@ class DiffuserDataset(Dataset):
 
 
 class ProcDataset(Dataset):
+    """ Dataset for generation pipeline. """
     def __init__(self, data_file, num_image, cat_proportions, num_controlnets=0):
         self.data_file = data_file
         self.num_images = num_image
@@ -138,14 +140,20 @@ class ProcDataset(Dataset):
         focus_prompt = generated_prompt.get("focus", "" if self.num_controlnets>1 else None)
         neg_prompt = self.generation_template.get("neg_prompt", "")
 
-        source_image = Image.open(self.images_rgb[image_id]).convert("RGB")
-        mask_image = Image.open(self.images_mask[image_id]).convert("L")
-        mask_conditioning_image = [Image.open(self.images_cond[image_id]).convert("RGB")] * self.num_controlnets if self.num_controlnets>1 else Image.open(self.images_cond[image_id]).convert("RGB")
+        try:
+            source_image = Image.open(self.images_rgb[image_id]).convert("RGB")
+            mask_image = Image.open(self.images_mask[image_id]).convert("L")
+            mask_image = mask_augmentation(mask_image, patch_p=0)
+            conditioning_image = Image.open(self.images_cond[image_id]).convert("RGB")
+            if self.num_controlnets>1:
+                conditioning_image = [conditioning_image] * self.num_controlnets
+        except Exception as e:
+            print("ERR:", self.images_rgb[image_id], self.images_mask[image_id], self.images_cond[image_id], str(e))
 
         # Preprocessing (color,dims,dtype,resize) and normalize: control images ∈ [0, 1] and images to encode ∈ [-1, 1]
         source = source_image
         mask = mask_image
-        conditioning = mask_conditioning_image
+        conditioning = conditioning_image
 
         return {"prompt":prompt, "control_prompt":control_prompt, "neg_prompt":neg_prompt, "focus_prompt":focus_prompt, "image":source, "image_name":self.images_rgb[image_id], "mask":mask, "mask_conditioning":conditioning, "category":generated_prompt["category"]}
 
