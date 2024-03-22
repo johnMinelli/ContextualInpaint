@@ -12,3 +12,4 @@ torchaudio==2.1.0
 wandb
 opencv-python
 diffusers
+requests

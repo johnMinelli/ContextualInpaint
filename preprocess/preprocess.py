@@ -74,7 +74,7 @@ def run_masking(args: argparse.Namespace):
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     predictor = DefaultPredictor(cfg)
     dil_kernel = np.ones((7, 7), np.uint8)  # Adjust the kernel size according to your requirements
-    sam_model_path = os.path.join(os.getenv("HF_HUB_CACHE", "."), 'sam_vit_h_4b8939.pth')
+    sam_model_path = "/tmp/sam_vit_h_4b8939.pth"
     if not os.path.exists(sam_model_path):
         print("Download SAM model...")
         r = requests.get('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', allow_redirects=True)
