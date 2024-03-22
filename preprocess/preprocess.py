@@ -103,7 +103,7 @@ def run_masking(args: argparse.Namespace):
             try:
                 rgb_im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
             except Exception as e:
-                print("ERR", os.path.join(root, filename), str(e))
+                print("ERR: reading", os.path.join(root, filename), str(e))
                 continue
             outputs = predictor(rgb_im)
             person_filter = outputs["instances"].pred_classes==0
@@ -112,7 +112,11 @@ def run_masking(args: argparse.Namespace):
             # SAM masks
             transformed_boxes = mask_predictor.transform.apply_boxes_torch(outputs["instances"].pred_boxes[person_filter].tensor, rgb_im.shape[:2])
             mask_predictor.set_image(rgb_im)
-            pred_masks = mask_predictor.predict_torch(boxes=transformed_boxes, multimask_output=False, point_coords=None, point_labels=None)[0][:,0]  # masks, scores, logits
+            try:
+                pred_masks = mask_predictor.predict_torch(boxes=transformed_boxes, multimask_output=False, point_coords=None, point_labels=None)[0][:,0]  # masks, scores, logits
+            except Exception as e:
+                print("ERR: mask detection", os.path.join(root, filename), str(e))
+                continue
             # combine masks and dilate
             pred_mask_bool = pred_masks.sum(0).bool().cpu()
             pred_mask_bool = cv2.dilate(pred_mask_bool.numpy().astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
@@ -208,7 +212,7 @@ def create_prompt_llava(args: argparse.Namespace):
                     mask_file = os.path.join(mask_folder, filename)
                     target_file = os.path.join(target_folder, filename)
 
-                    if os.path.isfile(input_file):
+                    if os.path.isfile(input_file) and os.path.exists(mask_file):
                         if input_file != target_file:
                             shutil.copyfile(input_file, target_file)
 
