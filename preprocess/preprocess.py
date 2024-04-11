@@ -50,7 +50,7 @@ def clean_preprocessed_data(args):
                 rgb_im = rgb_im[:,-shape[0]:]
                 mask_im = mask_im[:,-shape[0]:]
                 pose_im = pose_im[:,-shape[0]:]
-                if np.sum(mask_im[:,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))>0.15:
+                if np.sum(mask_im[:,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))>0.16 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))<0.85:
                     # resize
                     rgb_im = cv2.resize(rgb_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
@@ -63,6 +63,22 @@ def clean_preprocessed_data(args):
                     remove([rgb_path, mask_path, pose_path])
             else:
                 remove([rgb_path, mask_path, pose_path])
+
+    root = args.get("input_path", DATA_PATH)
+    if os.path.exists(os.path.join(root, "prompt.json")):
+        updated_lines = []
+        # read lines
+        with open(os.path.join(root, "prompt.json"), 'r') as file:
+            lines = file.readlines()
+        # check file existence for each line 
+        for line in lines:
+            json_data = json.loads(line)
+            if os.path.exists(os.path.join(root, json_data["target"])):
+                updated_lines.append(line)
+        # overwrite the json
+        with open(os.path.join(root, "prompt.json"), 'w') as file:
+            for line in updated_lines:
+                file.write(line)
 
 
 def run_masking(args: argparse.Namespace):
