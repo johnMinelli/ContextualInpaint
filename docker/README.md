@@ -33,13 +33,14 @@ docker build --tag vzc-preprocessing .
 ### (optional) push it online
 docker login
 docker tag vzc-preprocessing johnminelli/vzc-preprocessing 
-docker push vzc-preprocessing
+docker push johnminelli/vzc-preprocessing
 ### Create a container from the image
-docker run --name container -v /c/a:/mounted_input -v /c/b:/mounted_output -dit --rm --gpus all vzc-preprocessing
+docker run --name container -v /data01/gio/ctrl/a:/mounted_input -v /data01/gio/ctrl/b:/mounted_output -dit --rm --gpus all vzc-preprocessing
 ### Execute the container with terminal attached
 docker exec -it container sh
 
 ```
-python preprocess.py --action mask --input_path /mounted_input --output_path /mounted_output  
-python preprocess.py --action poses --input_path /mounted_input --output_path /mounted_output
+python preprocess.py --action mask --input_path /mounted_input --output_path /mounted_output
+python preprocess.py --action pose --input_path /mounted_input --output_path /mounted_output
+python preprocess.py --action prompt --input_path /mounted_input --output_path /mounted_output
 ```

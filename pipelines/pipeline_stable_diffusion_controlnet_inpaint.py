@@ -439,7 +439,6 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
     def check_inputs(
         self, prompt, controlnet_prompt, focus_prompt, image, height, width, mask=None, negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None, focus_prompt_embeds=None, controlnet_conditioning_scale=1.0, control_guidance_start=0.0, control_guidance_end=1.0, callback_on_step_end_tensor_inputs=None, generator=None
     ):
-        
         if height is not None and height % 8 != 0 or width is not None and width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
@@ -1000,7 +999,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             False if controlnet is None
             else controlnet.config.global_pool_conditions if isinstance(controlnet, ControlNetModel)
             else controlnet.nets[0].config.global_pool_conditions
-        )
+        ) 
         guess_mode = guess_mode or global_pool_conditions
 
         if focus_prompt:
@@ -1020,7 +1019,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         else:
             enable_prompt_focus = False
             self.num_focus_prompts = 0
-        
+
         if enable_prompt_focus:
             # initialize mask smoother, attention store and mod the unet 
             self.smoothing = GaussianSmoothing(device)
@@ -1065,10 +1064,11 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 return_tuple=False
             )  # (cfg*b*mp*n,seq,hid)
             if self.controlnet_prompt_seq_projection:
+                indices = torch.arange(controlnet_prompt_embeds.size(0)).view((1+int(do_classifier_free_guidance and not guess_mode))*batch_size,nets,num_images_per_prompt)[:,-1].flatten()
                 if hasattr(encoder, "visual_projection"):
-                    controlnet_prompt_embeds[-1] = self.controlnet_image_encoder.visual_projection(controlnet_prompt_embeds[-1])
+                    controlnet_prompt_embeds[indices] = self.controlnet_image_encoder.visual_projection(controlnet_prompt_embeds[indices]).to(controlnet_prompt_embeds.dtype)
                 elif hasattr(encoder, "text_projection"):
-                    controlnet_prompt_embeds[-1] = self.controlnet_text_encoder.text_projection(controlnet_prompt_embeds[-1])
+                    controlnet_prompt_embeds[indices] = self.controlnet_text_encoder.text_projection(controlnet_prompt_embeds[indices]).to(controlnet_prompt_embeds.dtype)
                 else:
                     logger.warning("`controlnet_prompt_seq_projection` is True but no text_encoder with projection is given.")
     
@@ -1115,21 +1115,21 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             init_image = None
             mask_image = None
         else:
-            init_image = self.image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+            init_image = self.image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32).to(device)
             # repeat for the batch if needed
             init_image = init_image.repeat(batch_size // init_image.shape[0], 1, 1, 1)  # (b,c,h,w)
             if mask_image is not None:
                 # Prepare mask latent
-                mask = self.mask_processor.preprocess(mask_image, height=height, width=width)
+                init_mask = self.mask_processor.preprocess(mask_image, height=height, width=width).to(device)
                 # repeat for the batch if needed 
-                mask = mask.repeat(batch_size // mask.shape[0], 1, 1, 1)  # (b,c,h,w)
+                init_mask = init_mask.repeat(batch_size // init_mask.shape[0], 1, 1, 1)  # (b,c,h,w)
                 masked_image = init_image.clone()
-                masked_image[mask.expand(init_image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
+                masked_image[init_mask.expand(init_image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
                 height, width = init_image.shape[-2:]
 
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        
+
         # When strength is less than 1.0 in img2img we start from a latent partially mixed with the given image (i.e. no full noise)
         # therefore we can reduce the number of timestep of denoising (e.g. 50% if strength is 0.5)
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps=num_inference_steps, strength=strength)
@@ -1160,7 +1160,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         if mask_image is not None:
             # Prepare mask latent variables
             mask, masked_image_latents = self.prepare_mask_latents(
-                mask,
+                init_mask,
                 masked_image,
                 num_images_per_prompt,
                 height,
@@ -1252,8 +1252,9 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 if gradient_checkpointing:
                     noise_pred = checkpoint.checkpoint(self.unet,
                     latent_model_input, t, prompt_embeds, None, timestep_cond, None, self.cross_attention_kwargs, None, 
-                           [d.detach() for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
-                           mid_block_res_sample.detach() if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None, None, None, False)[0]
+                           None if controlnet is None else [d.detach() for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
+                           None if controlnet is None else mid_block_res_sample.detach() if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None, None, None, False,
+                    use_reentrant=False)[0]
                 else:
                     noise_pred = self.unet(
                         sample=latent_model_input,
@@ -1280,13 +1281,13 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 if mask_image is not None and num_channels_unet == 4:
                     # Light inpaint: overwrite the latent sampling pixel values from mask
                     init_noisy_latents = image_latents
-                    init_mask = mask.chunk(1+int(do_classifier_free_guidance)+self.num_focus_prompts)[0]
+                    latents_inpaint_mask = mask.chunk(1+int(do_classifier_free_guidance)+self.num_focus_prompts)[0]
 
                     if i < len(timesteps) - 1:
                         noise_timestep = timesteps[i + 1]
                         init_noisy_latents = self.scheduler.add_noise(image_latents, init_noise, torch.tensor([noise_timestep]))
 
-                    denoised_latents = (1 - init_mask) * init_noisy_latents + init_mask * denoised_latents
+                    denoised_latents = (1 - latents_inpaint_mask) * init_noisy_latents + latents_inpaint_mask * denoised_latents
 
                 if enable_prompt_focus:
                     atten_threshold_c, res, block_positions = 0.9, 16, ["up", "down"]

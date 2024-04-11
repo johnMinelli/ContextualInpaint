@@ -10,7 +10,7 @@ class Train_args:
         self.parser.add_argument("--output_dir", type=str, default="controlnet-model", help="The output directory where the model predictions and checkpoints will be written.",)
         self.parser.add_argument("--cache_dir", type=str, default=None, help="The directory where the downloaded models and datasets will be stored.",)
         self.parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
-        self.parser.add_argument("--sd_unlock", type=int, default=-1, help="Number of steps after which we unlock the training for unet weights (only the second part of sd unet architecture). Set to -1 to disable it.")
+        self.parser.add_argument("--sd_unlock", type=int, default=-1, help="Number of epochs after which we unlock the training for unet weights (only the second part of sd unet architecture). Set to -1 to disable it.")
         self.parser.add_argument("--resolution", type=int, default=512, help=("The resolution for input images, all the images in the train/validation dataset will be resized to this resolution"),)
         self.parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader.")
         self.parser.add_argument("--num_train_epochs", type=int, default=10)
@@ -20,7 +20,7 @@ class Train_args:
                 "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
                 "Using a checkpoint for inference requires separate loading of the original pipeline and the individual checkpointed model components."
                 "See https://huggingface.co/docs/diffusers/main/en/training/dreambooth#performing-inference-using-a-saved-checkpoint for step by step instructions."),)
-        self.parser.add_argument("--checkpoints_total_limit", type=int, default=5, help=("Max number of checkpoints to store."),)
+        self.parser.add_argument("--checkpoints_total_limit", type=int, default=None, help=("Max number of checkpoints to store."),)
         self.parser.add_argument("--resume", type=str, default=None, help=("Whether training should be resumed from a previous checkpoint. Use a path saved by `--checkpointing_steps`, or `latest` to automatically select the last available checkpoint."),)
         self.parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.",)
         self.parser.add_argument("--gradient_checkpointing", action="store_true", help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",)

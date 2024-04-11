@@ -45,7 +45,7 @@ def run_data_filter(args: argparse.Namespace):
                 print("Reading captions:")
                 for an in tqdm(ans):
                     im_dict = dataset[an["image_id"]]
-                    im_dict["captions"].append(an["caption"])
+                    im_dict["captions"].append(an.get("caption", ""))
         # Read all instances and link them to each image
         with open(args.instances_file) as f:
             data = json.load(f)

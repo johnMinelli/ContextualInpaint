@@ -1,6 +1,4 @@
-﻿import random
-
-import PIL
+﻿import PIL
 import cv2
 import numpy as np
 from PIL import Image
@@ -34,12 +32,13 @@ def apply_additional_patches(mask, num_patches, contour):
     height, width = mask.shape[:2]
 
     for _ in range(num_patches):
-        patch_size = random.randint(50, 100)
-        patch_shape = random.choice(['rectangle', 'circle'])
+        patch_size = np.random.randint(50, 100)
+        patch_shape = np.random.choice(['rectangle', 'circle'])
         patch_color = 255
         # Get patch position
         contour_points = contour[:, 0, :]
-        patch_position = random.choice(contour_points)
+        random_index = np.random.randint(0, contour_points.shape[0])
+        patch_position = contour_points[random_index]
         patch_x = patch_position[0] - patch_size // 2
         patch_y = patch_position[1] - patch_size // 2
         # Ensure the patch stays within the image boundaries
@@ -49,13 +48,13 @@ def apply_additional_patches(mask, num_patches, contour):
         if patch_shape == 'rectangle':
             mask[patch_y:patch_y+patch_size, patch_x:patch_x+patch_size] = patch_color
         elif patch_shape == 'circle':
-            radius = random.randint(0, patch_size)
+            radius = np.random.randint(0, patch_size)
             cv2.circle(mask, (patch_x, patch_y), radius, patch_color, -1)
 
     return mask
 
 
-def mask_augmentation(mask_image, expansion_p=1, patch_p=1, min_expansion_factor=1, max_expansion_factor=1.6, patches=3):
+def mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1., max_expansion_factor=1.6, patches=3):
     mask = np.array(mask_image) if isinstance(mask_image, PIL.Image.Image) else mask_image
 
     # Apply image segmentation to isolate the mask
@@ -64,13 +63,13 @@ def mask_augmentation(mask_image, expansion_p=1, patch_p=1, min_expansion_factor
     contour = max(contours, key=cv2.contourArea)
 
     # Randomly expand the contour
-    if random.random() < expansion_p:
-        expansion_factor = random.uniform(min_expansion_factor, max_expansion_factor)
+    if np.random.random() < expansion_p:
+        expansion_factor = np.random.uniform(min_expansion_factor, max_expansion_factor)
         expanded_contour = expand_contour(contour, expansion_factor)
         mask = cv2.drawContours(mask, [expanded_contour], 0, 255, -1)
     # Randomly apply additional patches
-    if random.random() < patch_p:
-        num_patches = random.randint(1, patches)
+    if np.random.random() < patch_p:
+        num_patches = np.random.randint(1, patches)
         mask = apply_additional_patches(mask, num_patches, contour)
 
     mask = Image.fromarray(mask) if isinstance(mask_image, PIL.Image.Image) else mask

@@ -28,7 +28,6 @@ def clean_preprocessed_data(args):
         for f in files:
             os.remove(f)
 
-    dil_kernel = np.ones((7, 7), np.uint8)  # Adjust the kernel size according to your requirements
     for root, dirs, files in os.walk(os.path.join(args.get("input_path", DATA_PATH), "source")):
         if len(files)==0: continue
         print("Entering folder:", root)
@@ -39,18 +38,19 @@ def clean_preprocessed_data(args):
             pose_path = os.path.join(root.replace("source", "poses"), filename)
             try:
                 rgb_im = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
-                mask_im = cv2.cvtColor(cv2.imread(mask_path), cv2.COLOR_BGR2RGB)
+                mask_im = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                 pose_im = cv2.cvtColor(cv2.imread(pose_path), cv2.COLOR_BGR2RGB)
                 shape = rgb_im.shape
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
+            mask_im = cv2.threshold(mask_im,50,255,cv2.THRESH_BINARY)[1]
             if np.any(mask_im==255):
                 # right crop
-                rgb_im = rgb_im[:,-shape[0]:,:]
-                mask_im = mask_im[:,-shape[0]:,:]
-                pose_im = pose_im[:,-shape[0]:,:]
-                if np.sum(mask_im[:,0,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:,0]>50)/(shape[0]*shape[1]))>0.15:
+                rgb_im = rgb_im[:,-shape[0]:]
+                mask_im = mask_im[:,-shape[0]:]
+                pose_im = pose_im[:,-shape[0]:]
+                if np.sum(mask_im[:,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))>0.15:
                     # resize
                     rgb_im = cv2.resize(rgb_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
@@ -197,7 +197,7 @@ def create_prompt_llava(args: argparse.Namespace):
     pred.setup()
     query = "follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
     query = 'Provide as output ONLY THE BESTS label for the image choosing the list one of the following: "phone", "driver distracted", "driver drowsy", "driver attentive", "food or drink", "cigarette". "cigarette"=person interacting with a cigarette. "food or drink"=person interacting with foods or drinks. "phone"=person interacting with a phone. "driver attentive"=person focused watching forward with open eyes. "driver drowsy"= person with eyes closed or yawning (if drowsy not attentive or distracted). "driver distracted"=person not watching forward, or engaged in other activities, such as using a phone, eating, or smoking (if distracted not attentive or drowsy)'
-    query = "provide a COMPACT and OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out is visible, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed"
+    query = "provide a COMPACT and OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out of what is visible, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed"
 
     with open(os.path.join(root_out, 'prompt.json'), 'w') as outfile:
         # for folder_name in os.listdir(target_dir):

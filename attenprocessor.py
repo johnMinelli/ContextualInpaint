@@ -149,9 +149,9 @@ class CrossAttnProcessor:
 # Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionAttendAndExcitePipeline.GaussianSmoothing
 class GaussianSmoothing():
 
-    def __init__(self, device):
-        kernel_size = [3, 3]
-        sigma = [0.5, 0.5]
+    def __init__(self, device, kernel_size=3, sigma=0.5):
+        kernel_size = [kernel_size, kernel_size]
+        sigma = [sigma, sigma]
 
         # The gaussian kernel is the product of the gaussian function of each dimension.
         kernel = 1

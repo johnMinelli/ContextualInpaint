@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 import diffusers
 import transformers
+from diffusers.utils.torch_utils import randn_tensor
+
 import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -16,6 +18,7 @@ from accelerate.utils import ProjectConfiguration
 from diffusers.pipelines.controlnet import MultiControlNetModel
 from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import save_image
 from transformers import CLIPTextModelWithProjection
 from diffusers import ControlNetModel, DDIMScheduler
 
@@ -24,7 +27,7 @@ from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusi
 from third.verizon.ludovicodl.nn.models.object_in_hand import get_model
 from third.verizon.ludovicodl.training.learning import MultiTask
 from utils.parser import Optim_args
-from utils.data_utils import proc_collate_fn, not_image
+from utils.data_utils import not_image, proc_collate_fn
 from vsource.evaluation.tasks import PhoneUsageTask, CigaretteTask, FoodTask
 
 logger = get_logger(__name__)
@@ -89,6 +92,7 @@ pipeline.controlnet.requires_grad_(False)
 classifier.requires_grad_(False)
 classifier.eval()
 classifier.load_state_dict((lambda f,l: {k:v  for k,v in zip(f.keys(), l.values())})(classifier.state_dict(), torch.load("./out/best_model_31_val_score=2.6616.pt", map_location=accelerator.device)))
+# classifier.load_state_dict((lambda f,l: {k:v  for k,v in zip(f.keys(), l.values())})(classifier.state_dict(), torch.load("./out/oih-emb_sd/checkpoint_9760.pt", map_location=accelerator.device)["model"]))
 
 
 if args.gradient_checkpointing:
@@ -106,7 +110,7 @@ else:
 
 # Dataset
 task_to_class = {'phone_binary': ["phone"], 'cigarette_binary': ["cigarette"], 'food_binary': ["food", "drink"]}
-class_to_task = {'phone':'phone_binary', 'cigarette':'cigarette_binary', 'food':'food_binary', 'drink':'food_binary'}
+class_to_task = {'phone':['phone_binary'], 'cigarette':['cigarette_binary'], 'food':['food_binary'], 'drink':['food_binary'], 'default':['phone_binary', 'cigarette_binary', 'food_binary']}
 categories = {"food":0.31, "drink":0.07, "phone":0.52, "cigarette":0.10, "default":0.0}
 procedural_dataset = ProcDataset(args.evaluation_file, args.num_validation_images, categories, len(controlnet) if controlnet is not None else 0)
 procedural_dataloader = torch.utils.data.DataLoader(procedural_dataset, shuffle=True, batch_size=args.batch_size, num_workers=args.dataloader_num_workers, collate_fn=proc_collate_fn)
@@ -121,40 +125,90 @@ pipeline.controlnet_text_encoder.to(accelerator.device, dtype=torch.float32)
 if args.log == "wandb":
     wandb.init(entity="johnminelli", project="train_controlnet")
 
-# cycle taking batches of procedurally generated prompts 
+# cycle taking batches of procedurally generated prompts
 for gen_id, batch in enumerate(procedural_dataloader):
-    or_prompt_embeds = pipeline.encode_prompt(batch["prompt"], accelerator.device, False, pipeline.text_encoder, num_images_per_prompt=1, return_tuple=False)
-    prompt_embeds = or_prompt_embeds.clone()
-    prompt_embeds.requires_grad = True
-    optimizer = torch.optim.AdamW([prompt_embeds], lr=0.001, betas=(args.adam_beta1, args.adam_beta2), weight_decay=args.adam_weight_decay, eps=args.adam_epsilon, )
+    num_inference_steps = 35
+    start_optim_step = 33  # num cycles from {inference_steps-num_optim_steps} --> 0
     num_optim_steps = 20
-    num_inference_steps = 20
-    cg_scale = 10
+    free_guidance_scale = 10
+    classifier_guidance_scale = 2
+    controlnet_scale = [2.,2.]
+    grads = []
+    scores = []
 
     # optimize generation for given prompts
     print(f"Generation {gen_id}, {str(batch['category'][0])}")
     for i in range(num_optim_steps):
         generator = torch.Generator(device=pipeline.device).manual_seed(args.seed)
         # generate the image from text
-        pred_images = pipeline(prompt_embeds=prompt_embeds, controlnet_prompt=batch["control_prompt"], negative_prompt=batch["neg_prompt"], focus_prompt=batch["focus_prompt"],
+        pred_images, _, cg_image, valid = pipeline(prompt=batch["prompt"], controlnet_prompt=batch["control_prompt"], negative_prompt=batch["neg_prompt"], focus_prompt=batch["focus_prompt"],
                               image=batch["image"], mask_image=batch["mask"], conditioning_image=batch["mask_conditioning"], height=512, width=512,
-                              strength=1.0, controlnet_conditioning_scale=[0.90, 0.95], num_inference_steps=num_inference_steps, guidance_scale=8, guess_mode=True, generator=generator, output_type="pt", gradient_checkpointing=args.gradient_checkpointing).images
+                              strength=1.0, controlnet_conditioning_scale=controlnet_scale, num_inference_steps=num_inference_steps, guidance_scale=free_guidance_scale, cg_step=num_inference_steps-1-start_optim_step, cg_values=grads.copy(), guess_mode=True, generator=generator, output_type="pt", gradient_checkpointing=args.gradient_checkpointing, return_dict=False)
         # classify the output image
         out = cg_task.forward_pass(x=pred_images, y={k:torch.tensor([1 if cat in v else 0 for cat in batch["category"]]).to(accelerator.device) for k,v in task_to_class.items()}, model=classifier, device=accelerator.device)
-        scores = torch.cat([torch.sigmoid(out[class_to_task[cat]]["out"]) for cat in batch["category"]])
-        if i==0 and any(scores<0.15): break  # early exit
+        score = torch.stack([torch.cat([torch.sigmoid(out[task]["out"]) for task in class_to_task[cat]]).mean() for cat in batch["category"]])
+        # Score positive if the generation is not valid, score negative if the generation is valid
+        log_neg_probs = torch.log(1-score)
         # get optimization direction
-        log_probs = torch.log_softmax(torch.cat([1 - scores, scores], -1), dim=-1)[:, (scores[:,0].detach()<=0.5).int()].mean() * cg_scale
+        # grads.append(torch.autograd.grad(log_neg_probs, cg_image)[0] * classifier_guidance_scale)
         # logging
-        print("SCORES:", scores.detach().cpu().numpy(), " - DIFF:", (or_prompt_embeds-prompt_embeds).sum().detach().cpu().numpy())
-        wandb.log({f"Generation/Gen_{gen_id}_image": wandb.Image(pred_images[0].permute(1, 2, 0).detach().cpu().numpy(), caption=str(batch["category"][0])), f"Generation/Gen_{gen_id}_score":scores[0][0].detach().cpu().numpy(), f"Generation/Gen_{gen_id}_delta":(or_prompt_embeds-prompt_embeds).sum().detach().cpu().numpy()})
-        plt.imshow(pred_images[0].permute(1, 2, 0).detach().cpu()); plt.title(str(batch["category"][0])); plt.show()
-        # optimize
-        optimizer.zero_grad()
-        log_probs.backward()
-        optimizer.step()
-
+        print("SCORES:", score.detach().cpu().numpy())
+        scores.append(score.detach().cpu().numpy()[0])
+        # wandb.log({f"Generation/Gen_{gen_id}_image": wandb.Image(pared_images[0].permute(1, 2, 0).detach().cpu().numpy(), caption=str(batch["category"][0])), f"Generation/Gen_{gen_id}_score":scores[0][0].detach().cpu().numpy(), f"Generation/Gen_{gen_id}_delta":(or_prompt_embeds-prompt_embeds).sum().detach().cpu().numpy()})
+        plt.imshow(pred_images[0].permute(1, 2, 0).detach().cpu()); plt.title(str(gen_id)+". "+str(batch['category'][0])+" "+str(valid)+" "+str(round(float(score),3))); plt.show()
+    # plt.plot(scores); plt.title(f"{str(batch['category'][0])} {num_optim_steps} out of {num_inference_steps}"); plt.show()
+    continue
     # log&save final result
     for i, pred_image in enumerate(pred_images):
-        log = {"source": batch["image"][i], "category": batch["category"][i], "predictions": pred_image, "source_filename":os.path.basename(batch["image_name"][i]), "prompt": batch["prompt"][i], "control": batch["control_prompt"][i][-1] if type(controlnet)==list else batch["control_prompt"][i]}
-        # do some logging here
+        log = {"source": batch["image"][i], "category": batch["category"][i], "predictions": pred_image,
+               "source_filename": os.path.basename(batch["image_name"][i]), "prompt": batch["prompt"][i],
+               "control": batch["control_prompt"][i][-1] if type(controlnet) == list else batch["control_prompt"][i]}
+
+        if args.log == "tensorboard":
+            writer = SummaryWriter()
+            images = log["predictions"]
+            prompt = log["prompt"]
+            image = log["source"]
+            formatted_images = [np.asarray(image)]
+
+            for image in images:
+                formatted_images.append(np.asarray(image))
+
+            formatted_images = np.stack(formatted_images)
+
+            writer.add_images(prompt, formatted_images, 0, dataformats="NHWC")
+        elif args.log == "wandb":
+            run = wandb.init(entity="johnminelli", project="train_controlnet", resume=args.log_run_id)
+            formatted_images = []
+            images = log["predictions"]
+            prompt = log["prompt"]
+            image = log["source"]
+
+            formatted_images.append(wandb.Image(image, caption="Controlnet conditioning"))
+
+            for image in images:
+                image = wandb.Image(image, caption=prompt)
+                formatted_images.append(image)
+
+            run.log({"evaluation": formatted_images})
+            wandb.finish()
+        else:
+            out_folder = "train_data_gen_optim"
+            out_filename = "train.csv"
+
+            # save locally
+            out_path = os.path.join("./out", out_folder)
+            if not os.path.exists(out_path):
+                os.makedirs(out_path)
+                with open(os.path.join(out_path, out_filename), 'w') as file:
+                    file.write(csv_header + '\n')
+
+            # for hp_id in range(len(log["predictions"])):  # hp fixed
+            filename = os.path.splitext(log["source_filename"])[0] + "_" + str(20000+(gen_id * args.batch_size) + i) + \
+                       os.path.splitext(log["source_filename"])[1]
+            save_image(log["predictions"], os.path.join(out_path, filename))
+
+            csv_line = ",".join([os.path.splitext(filename)[0], "train", cat2classficationhead(log["category"])])
+
+            with open(os.path.join(out_path, "train.csv"), 'a') as file:
+                file.write(csv_line + '\n')

@@ -42,15 +42,9 @@ from transformers import AutoTokenizer, CLIPVisionModel, CLIPTextModel, CLIPText
     CLIPVisionModelWithProjection
 
 import diffusers
-from diffusers import (
-    AutoencoderKL,
-    ControlNetModel,
-    DDPMScheduler,
-    StableDiffusionControlNetImg2ImgPipeline,
-    StableDiffusionControlNetInpaintPipeline,
-    UNet2DConditionModel,
-    UniPCMultistepScheduler,
-)
+from diffusers import (AutoencoderKL, ControlNetModel, DDIMScheduler, StableDiffusionControlNetImg2ImgPipeline,
+                       StableDiffusionControlNetInpaintPipeline, UNet2DConditionModel, UniPCMultistepScheduler,
+                       )
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
@@ -211,14 +205,14 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer) for data_dir in args.train_data_dir]
-        self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
+        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, apply_mask_augmentation=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
+        self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class
         text_encoder_cls = import_text_encoder_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
         # Load scheduler and models
-        self.noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+        self.noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         self.text_encoder = text_encoder_cls.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
         # Custom encoder since sd2 doesn't have the weights for the visual counterpart necessary for obj_masking controlnet 
         self.controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
@@ -243,12 +237,11 @@ class Trainer():
                 if self.accelerator.is_main_process:
                     i = len(weights) - 1
 
+                    sub_dirs = ["controlnet", "unet"]
                     while len(weights) > 0:
                         weights.pop()
                         model = models[i]
-
-                        sub_dir = "controlnet"
-                        model.save_pretrained(os.path.join(output_dir, sub_dir))
+                        model.save_pretrained(os.path.join(output_dir, sub_dirs[i]))
                         i -= 1
 
             def load_model_hook(models, input_dir):
@@ -354,7 +347,7 @@ class Trainer():
 
         # pass controlnet and (optionally) sd parameters to optimizer
         params = list(self.controlnet.parameters())
-        if args.sd_unlock > 0:
+        if args.sd_unlock >= 0:
             params += self.unet.up_blocks.parameters()
             params += self.unet.conv_norm_out.parameters()
 
@@ -383,9 +376,10 @@ class Trainer():
         )
 
         # Prepare everything with accelerator library
-        self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
-            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler
-        )
+        if args.sd_unlock >= 0:
+           self.controlnet,  self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler)
+        else:
+            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler)
 
         # For mixed precision training we cast the text_encoder and vae weights to half-precision
         # as these models are only used for inference, keeping weights in full precision is not required.
@@ -476,7 +470,7 @@ class Trainer():
         training_nets = [self.controlnet]
         for epoch in range(self.first_epoch, args.num_train_epochs):
             for step, batch in enumerate(self.train_dataloader):
-                if args.sd_unlock > 0 and step >= args.sd_unlock:
+                if args.sd_unlock >= 0 and epoch >= args.sd_unlock:
                     args.sd_unlock = -1
                     self.unet.up_blocks.requires_grad_(True)
                     self.unet.conv_norm_out.requires_grad_(True)

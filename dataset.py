@@ -4,6 +4,7 @@ import os
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 from accelerate.logging import get_logger
 from diffusers.image_processor import VaeImageProcessor
@@ -19,10 +20,12 @@ logger = get_logger(__name__)
 
 class DiffuserDataset(Dataset):
     """ Dataset for training and validation. """
-    def __init__(self, data_dir, resolution=512, tokenizer=None):
+    def __init__(self, data_dir, resolution=512, tokenizer=None, apply_transformations=False, apply_mask_augmentation=False):
         self.data_dir = data_dir
         self.resolution = resolution
         self.tokenizer = tokenizer
+        self.apply_transformations = apply_transformations
+        self.apply_mask_augmentation = apply_mask_augmentation
         self.vae_scale_factor = 8  # rescale the image to be a multiple of: 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.mask_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True)
@@ -57,6 +60,8 @@ class DiffuserDataset(Dataset):
                 # transforms.CenterCrop(args.resolution),
             ]
         )
+        self.tr_g = transforms.Grayscale()
+        self.tr_f = transforms.RandomHorizontalFlip(p=1)
 
     def _tokenize_prompt(self, sample_prompt, is_train=True):
         if np.random.random() < self.proportion_empty_prompts:
@@ -88,15 +93,27 @@ class DiffuserDataset(Dataset):
         try:
             target_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, target_filename)), cv2.COLOR_BGR2RGB)
             mask_image = cv2.imread(os.path.join(self.data_dir, mask_filename), cv2.IMREAD_GRAYSCALE)
-            mask_image = mask_augmentation(mask_image)
-            conditioning_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir , conditioning_filename)), cv2.COLOR_BGR2RGB)
+            mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.1, max_expansion_factor=1.5, patches=3)
+            if self.apply_mask_augmentation:
+                conditioning_image = cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
+            else:
+                conditioning_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, mask_filename)), cv2.COLOR_BGR2RGB)
+
         except Exception as e:
             print("ERR:", os.path.join(self.data_dir, target_filename), os.path.join(self.data_dir, mask_filename), os.path.join(self.data_dir, conditioning_filename), str(e))
 
         # Preprocessing (color,dims,dtype,resize) and normalize: control images ∈ [0, 1] and images to encode ∈ [-1, 1]
         target = self.image_processor.preprocess(target_image/255., height=self.resolution, width=self.resolution).squeeze(0)
         mask = self.mask_processor.preprocess(mask_image/255., height=self.resolution, width=self.resolution).squeeze(0)
-        conditioning = self.conditioning_image_processor.preprocess(cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)/255., height=self.resolution, width=self.resolution).squeeze(0)
+        conditioning = self.conditioning_image_processor.preprocess(conditioning_image/255., height=self.resolution, width=self.resolution).squeeze(0)
+
+        if self.apply_transformations:
+            if torch.rand(1) < 0.2:
+                target = self.tr_g(target).repeat(3,1,1)
+            if torch.rand(1) < 0.5:
+                target = self.tr_f(target)
+                mask = self.tr_f(mask)
+                conditioning = self.tr_f(conditioning)
 
         return {"image": target, "txt": prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "mask": mask}
 
@@ -143,19 +160,19 @@ class ProcDataset(Dataset):
         try:
             source_image = Image.open(self.images_rgb[image_id]).convert("RGB")
             mask_image = Image.open(self.images_mask[image_id]).convert("L")
-            mask_image = mask_augmentation(mask_image, patch_p=0)
-            conditioning_image = Image.open(self.images_cond[image_id]).convert("RGB")
+            mask_image = mask_augmentation(mask_image, expansion_p=1, patch_p=0., min_expansion_factor=1.2, max_expansion_factor=1.5)
+            mask_conditioning_image = mask_image.convert("RGB")
             if self.num_controlnets>1:
-                conditioning_image = [conditioning_image] * self.num_controlnets
+                mask_conditioning_image = [mask_conditioning_image] * self.num_controlnets
         except Exception as e:
             print("ERR:", self.images_rgb[image_id], self.images_mask[image_id], self.images_cond[image_id], str(e))
 
-        # Preprocessing (color,dims,dtype,resize) and normalize: control images ∈ [0, 1] and images to encode ∈ [-1, 1]
+        # Returns PIL Images or Tensors preprocessed (color,dims,dtype,resize) and normalized: control images ∈ [0, 1] and images to encode ∈ [-1, 1]
         source = source_image
         mask = mask_image
-        conditioning = conditioning_image
+        mask_conditioning = mask_conditioning_image
 
-        return {"prompt":prompt, "control_prompt":control_prompt, "neg_prompt":neg_prompt, "focus_prompt":focus_prompt, "image":source, "image_name":self.images_rgb[image_id], "mask":mask, "mask_conditioning":conditioning, "category":generated_prompt["category"]}
+        return {"prompt":prompt, "control_prompt":control_prompt, "neg_prompt":neg_prompt, "focus_prompt":focus_prompt, "image":source, "image_name":self.images_rgb[image_id], "mask":mask, "mask_conditioning":mask_conditioning, "category":generated_prompt["category"]}
 
 
 if __name__ == '__main__':

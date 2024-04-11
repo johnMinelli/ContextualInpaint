@@ -33,15 +33,21 @@ def split_multi_net(controlnet, attention_mask, encoder_hidden_states, controlne
         controlnet_cond = [controlnet_cond]
 
     for i, (controlnet, enc_hid_state, image, scale) in enumerate(zip(controlnets, encoder_hidden_states, controlnet_cond, conditioning_scale)):
+        # Apply attention focused mask
+        if attention_mask is not None:
+            atten_mask = F.interpolate(attention_mask.to(torch.float32), image.shape[-2:]).expand(*image.shape)
+            if len(controlnets) == 1 or i>0:
+                image = torch.logical_and(atten_mask, image>0.5).to(torch.float32)
+
         down_samples, mid_sample = controlnet(encoder_hidden_states=enc_hid_state,
                                               controlnet_cond=image,
                                               conditioning_scale=scale,
                                               guess_mode=guess_mode, **args)
-        # Apply attention focused mask
-        if attention_mask is not None and (len(controlnets) == 1 or i>0):
-            # match the size and apply mask
-            mid_sample = mask_block(attention_mask, mid_sample)
-            down_samples = [mask_block(attention_mask, block) for block in down_samples]
+        # # Apply attention focused mask
+        # if attention_mask is not None and (len(controlnets) == 1 or i>0):
+        #     # match the size and apply mask
+        #     mid_sample = mask_block(attention_mask, mid_sample)
+        #     down_samples = [mask_block(attention_mask, block) for block in down_samples]
             
         # Merge samples
         if i == 0:

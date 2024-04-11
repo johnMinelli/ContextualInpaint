@@ -24,13 +24,15 @@ CONTROLNET_OBJ_MASKING = True
 
 # init ControlNet(s)
 controlnet = None
-if len(args.controlnet_model_name_or_path)>1:
-    assert CONTROLNET_OBJ_MASKING, "`CONTROLNET_OBJ_MASKING` is False but more than 1 model is provided. This is not an intended use."
-    controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
-elif len(args.controlnet_model_name_or_path)==1:
-    print(f"WARN: `CONTROLNET_OBJ_MASKING` is {CONTROLNET_OBJ_MASKING}. Make sure you are running the intended controlnet model.")
-    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path[0], torch_dtype=torch.float32)
-controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
+controlnet_text_encoder = None
+if args.controlnet_model_name_or_path is not None:
+    if len(args.controlnet_model_name_or_path)>1:
+        assert CONTROLNET_OBJ_MASKING, "`CONTROLNET_OBJ_MASKING` is False but more than 1 model is provided. This is not an intended use."
+        controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
+    elif len(args.controlnet_model_name_or_path)==1:
+        print(f"WARN: `CONTROLNET_OBJ_MASKING` is {CONTROLNET_OBJ_MASKING}. Make sure you are running the intended controlnet model.")
+        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path[0], torch_dtype=torch.float32)
+    controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
 
 # init pipeline
 pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
@@ -103,11 +105,14 @@ for gen_id, batch in enumerate(procedural_dataloader):
             run.log({"evaluation": formatted_images})
             wandb.finish()
         else:
+            out_folder = "train_data_gen"
+            out_filename = "train.csv"
+
             # save locally
-            out_path = os.path.join("./out", "train_data_gen")
+            out_path = os.path.join("./out", out_folder)
             if not os.path.exists(out_path):
                 os.makedirs(out_path)
-                with open(os.path.join(out_path, "train.csv"), 'w') as file:
+                with open(os.path.join(out_path, out_filename), 'w') as file:
                     file.write(csv_header+'\n')
 
             # for hp_id in range(len(log["predictions"])):  # hp fixed
@@ -116,7 +121,7 @@ for gen_id, batch in enumerate(procedural_dataloader):
 
             csv_line = ",".join([os.path.splitext(filename)[0], "train", cat2classficationhead(log["category"])])
 
-            with open(os.path.join(out_path, "train.csv"), 'a') as file:
+            with open(os.path.join(out_path, out_filename), 'a') as file:
                 file.write(csv_line+'\n')
 
                 # show images here
