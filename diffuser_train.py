@@ -248,13 +248,13 @@ class Trainer():
                 while len(models) > 0:
                     # pop models so that they are not loaded again
                     model = models.pop()
-
-                    # load diffusers style into model
-                    load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                    model.register_to_config(**load_model.config)
-
-                    model.load_state_dict(load_model.state_dict())
-                    del load_model
+                    if isinstance(model, ControlNetModel):
+                        # load diffusers style into model
+                        load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                        model.register_to_config(**load_model.config)
+    
+                        model.load_state_dict(load_model.state_dict())
+                        del load_model
 
             def enable_model_cpu_offload():
                 """
