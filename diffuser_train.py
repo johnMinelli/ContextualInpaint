@@ -26,7 +26,6 @@ import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -271,7 +270,7 @@ class Trainer():
                 device = torch.device("cuda")
 
                 hook = None
-                for cpu_offloaded_model in [self.text_encoder, self.controlnet_image_encoder, self.controlnet_text_encoder, self.vae]:
+                for cpu_offloaded_model in [self.vae, self.text_encoder, self.controlnet_text_encoder]:
                     _, hook = cpu_offload_with_hook(cpu_offloaded_model, device, prev_module_hook=hook)
 
                 if self.safety_checker is not None:
@@ -279,7 +278,7 @@ class Trainer():
                     _, hook = cpu_offload_with_hook(self.safety_checker, device, prev_module_hook=hook)
 
                 # control net hook has be manually offloaded as it alternates with unet
-                cpu_offload_with_hook(self.controlnet, device)
+                _, hook = cpu_offload_with_hook(self.controlnet, device, hook)
 
                 # We'll offload the last model manually.
                 self.final_offload_hook = hook
@@ -374,13 +373,7 @@ class Trainer():
             num_cycles=args.lr_num_cycles,
             power=args.lr_power,
         )
-
-        # Prepare everything with accelerator library
-        if args.sd_unlock >= 0:
-           self.controlnet,  self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler)
-        else:
-            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler)
-
+        
         # For mixed precision training we cast the text_encoder and vae weights to half-precision
         # as these models are only used for inference, keeping weights in full precision is not required.
         self.weight_dtype = torch.float32
@@ -389,9 +382,15 @@ class Trainer():
         elif self.accelerator.mixed_precision == "bf16":
             self.weight_dtype = torch.bfloat16
 
-        # Move vae, unet and text_encoder to device and cast to weight_dtype
+        # Prepare everything with accelerator library
+        if args.sd_unlock >= 0:
+            self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler)
+        else:
+            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler)
+            self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
+
+        # Move vae, and text_encoder to device and cast to weight_dtype
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_image_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
@@ -510,10 +509,9 @@ class Trainer():
 
                     flag_image_as_hid_prompt = (np.random.random() > 0.5) if TRAIN_OBJ_MASKING else False
 
-                    encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) \
-                        if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
-                    encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
-                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
+                    encoder_hidden_states, _ = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False, return_length=True)
+                    encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
+                    encoder_hidden_states_ctrl, _ = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False, return_length=True)
 
                     if TRAIN_OBJ_MASKING:
                         # apply projection layer to all sequence tokens to match size between the two encoders
@@ -526,6 +524,9 @@ class Trainer():
                         controlnet_cond=conditioning_image,
                         return_dict=False,
                     )
+                    
+                    if self.args.enable_cpu_offload:
+                        torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
                         if TRAIN_OBJ_MASKING:
