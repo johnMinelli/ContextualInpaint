@@ -116,11 +116,11 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         with torch.no_grad():
             pred_images = []
             for i in range(args.num_validation_images):
-                    with torch.autocast(f"cuda"):
-                        pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
-                                              image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
-                                              strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
-                    pred_images.append(pred_image)
+                with torch.autocast(f"cuda"):
+                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
+                                          image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
+                                          strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
+                pred_images.append(pred_image)
     
             image_logs.append({"reference": image, "images": pred_images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
 
