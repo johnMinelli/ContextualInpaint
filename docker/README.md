@@ -28,7 +28,9 @@ RUN sudo apt-get update && sudo apt-get install -y vim
 ```
 Or run them in the container to make temporary changes.
 
+
 ### Build docker file
+cd docker
 docker build --tag vzc-preprocessing .
 ### (optional) push it online
 docker login

@@ -126,3 +126,80 @@ These are controlnet weights trained on {base_model} with new type of conditioni
     with open(os.path.join(repo_folder, "README.md"), "w") as f:
         f.write(yaml + model_card)
 
+
+def bilinear_interpolate(matrix, coords):
+    # Get dimensions
+    batch_size, height, width = matrix.shape
+    n_coords = coords.shape[1]
+
+    # Reshape coords for broadcasting
+    coords = coords.unsqueeze(2)  # shape: (batch_size, n_coords, 1, 2)
+
+    # Compute the coordinates of the four points around the given coordinates
+    floor_coords = torch.floor(coords).long()
+    ceil_coords = torch.ceil(coords).long()
+
+    # Clamp coordinates to be within the matrix range
+    floor_coords = torch.clamp(floor_coords, 0, height - 1)
+    ceil_coords = torch.clamp(ceil_coords, 0, height - 1)
+
+    # Extract the four neighboring points' values
+    top_left = torch.stack([matrix[i, floor_coords[i, :, :, 0], floor_coords[i, :, :, 1]] for i in torch.arange(batch_size)])
+    top_right = torch.stack([matrix[i, floor_coords[i, :, :, 0], ceil_coords[i, :, :, 1]] for i in torch.arange(batch_size)])
+    bottom_left = torch.stack([matrix[i, ceil_coords[i, :, :, 0], floor_coords[i, :, :, 1]] for i in torch.arange(batch_size)])
+    bottom_right = torch.stack([matrix[i, ceil_coords[i, :, :, 0], ceil_coords[i, :, :, 1]] for i in torch.arange(batch_size)])
+
+    # Calculate the weights for interpolation
+    x_weights = coords[..., 0] - floor_coords[..., 0].float()
+    y_weights = coords[..., 1] - floor_coords[..., 1].float()
+
+    # Perform bilinear interpolation
+    top_interpolation = top_left * (1 - x_weights) + top_right * x_weights
+    bottom_interpolation = bottom_left * (1 - x_weights) + bottom_right * x_weights
+    interpolated_values = top_interpolation * (1 - y_weights) + bottom_interpolation * y_weights
+
+    return interpolated_values.squeeze()
+
+
+def get_interpolated_patch(matrix, coord, p_size=2):
+    b, c, h, w = matrix.shape
+    batched_patch_coords = []
+    for i in range(b):
+        x, y = coord[i, 0].item(), coord[i, 1].item()
+        patch_coords = torch.tensor([[y + dy, x + dx] for dx in range(-p_size, p_size + 1) for dy in range(-p_size, p_size + 1)]).to(matrix.device)
+        patch_coords[:, 0] = torch.clamp(patch_coords[:, 0], 0, h - 1)
+        patch_coords[:, 1] = torch.clamp(patch_coords[:, 1], 0, w - 1)
+        batched_patch_coords.append(patch_coords)
+
+    return bilinear_interpolate(matrix.view(b*c,h,w), torch.stack(batched_patch_coords).repeat_interleave(c, 0)).view(b, c, p_size*2+1, p_size*2+1)
+
+
+def compute_centroid(matrix, res):
+    # Get the batch size, height, and width of the attention map
+    b, h, w = matrix.size()
+
+    # Create the coordinate grid
+    x_coords = torch.arange(0, w, dtype=torch.float32, device=matrix.device)
+    y_coords = torch.arange(0, h, dtype=torch.float32, device=matrix.device)
+    x_grid, y_grid = torch.meshgrid(x_coords, y_coords)
+
+    # Reshape tensors for computation
+    map_values_flat = matrix.view(b, -1)
+    x_grid_flat = x_grid.reshape(-1)
+    y_grid_flat = y_grid.reshape(-1)
+
+    # Compute the weighted sum of x and y coordinates
+    weighted_sum_x = torch.sum(map_values_flat * x_grid_flat.unsqueeze(0), dim=1)
+    weighted_sum_y = torch.sum(map_values_flat * y_grid_flat.unsqueeze(0), dim=1)
+
+    # Compute the total sum of map values
+    total_sum = torch.sum(map_values_flat, dim=1)
+
+    # Compute the centroid coordinates
+    centroid_x = (weighted_sum_y / total_sum)
+    centroid_y = (weighted_sum_x / total_sum)
+
+    # Stack centroid coordinates along the last dimension
+    centroid_coords = torch.stack([centroid_x, centroid_y], dim=1)
+
+    return centroid_coords

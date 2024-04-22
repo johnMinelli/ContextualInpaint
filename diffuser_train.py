@@ -18,7 +18,6 @@ import json
 import logging
 import math
 import os
-import random
 import shutil
 from pathlib import Path
 
@@ -30,8 +29,8 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from safetensors.torch import load_file, save_file
 
+from attenprocessor import AttentionStore
 from dataset import DiffuserDataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
@@ -41,20 +40,20 @@ from transformers import AutoTokenizer, CLIPVisionModel, CLIPTextModel, CLIPText
     CLIPVisionModelWithProjection
 
 import diffusers
-from diffusers import (AutoencoderKL, ControlNetModel, DDIMScheduler, StableDiffusionControlNetImg2ImgPipeline,
-                       StableDiffusionControlNetInpaintPipeline, UNet2DConditionModel, UniPCMultistepScheduler,
-                       )
+from diffusers import (AutoencoderKL, ControlNetModel,StableDiffusionControlNetImg2ImgPipeline,
+                       StableDiffusionControlNetInpaintPipeline, UNet2DConditionModel, UniPCMultistepScheduler, DDPMScheduler)
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
 from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
+# from scheduler import DDIMScheduler
 from utils.parser import Train_args
-from utils.utils import import_text_encoder_from_model_name_or_path, replicate, mask_block
+from utils.utils import import_text_encoder_from_model_name_or_path, replicate, mask_block, compute_centroid
 
 if is_wandb_available():
     import wandb
-    # wandb.init(project="train_controlnet", resume="goirmfze")
+    # wandb.init(project="train_controlnet", resume="9a4jqxny")
 
 
 logger = get_logger(__name__)
@@ -255,7 +254,7 @@ class Trainer():
                         model.load_state_dict(load_model.state_dict())
                         del load_model
 
-            def enable_model_cpu_offload():
+            def enable_models_cpu_offload():
                 """
                 Offloads all models to CPU using accelerate, reducing memory usage with a low impact on performance. Compared
                 to `enable_sequential_cpu_offload`, this method moves one whole model at a time to the GPU when its `forward`
@@ -285,7 +284,7 @@ class Trainer():
 
             self.accelerator.register_save_state_pre_hook(save_model_hook)
             self.accelerator.register_load_state_pre_hook(load_model_hook)
-            if args.enable_cpu_offload: enable_model_cpu_offload()
+            if args.enable_cpu_offload: enable_models_cpu_offload()
 
         self.vae.requires_grad_(False)
         self.unet.requires_grad_(False)
@@ -509,9 +508,9 @@ class Trainer():
 
                     flag_image_as_hid_prompt = (np.random.random() > 0.5) if TRAIN_OBJ_MASKING else False
 
-                    encoder_hidden_states, _ = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False, return_length=True)
+                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
                     encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
-                    encoder_hidden_states_ctrl, _ = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False, return_length=True)
+                    encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
 
                     if TRAIN_OBJ_MASKING:
                         # apply projection layer to all sequence tokens to match size between the two encoders

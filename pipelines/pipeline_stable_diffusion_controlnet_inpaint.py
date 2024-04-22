@@ -230,15 +230,15 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
     def _get_image_embeddings(self, image_path, encoder, device=None, dtype=None):
         image = [PIL.Image.open(p).convert("RGB") for p in image_path]
-        image = self.image_processor.preprocess(image, 224, 224).to(device=device)
+        image = self.image_processor.preprocess(image, 224, 224).to(device=device).to(dtype=dtype)
         image_embeds = encoder(pixel_values=image).last_hidden_state
 
         return image_embeds.to(device=device, dtype=dtype)
 
     def _get_text_embeddings(self, prompt, encoder, max_length, check_truncation=True, clip_skip=None, device=None, dtype=None):
         text_inputs = self.tokenizer(prompt, padding="max_length", max_length=max_length, truncation=True, return_length=True, return_tensors="pt")
-        tokenized_length = text_inputs.length - 2  # <startoftext< and <endoftext>
-        text_input_ids = text_inputs.input_ids
+        text_tokenized_length = text_inputs.length - 2  # <startoftext< and <endoftext>
+        text_input_ids = text_inputs.input_ids.to(device=device)
 
         if check_truncation:
             untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
@@ -262,7 +262,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             # The `last_hidden_states` that we typically use for obtaining the final prompt representations passes through the LayerNorm layer.
             prompt_embeds = encoder.text_model.final_layer_norm(prompt_embeds)
 
-        return prompt_embeds.to(device=device, dtype=dtype), tokenized_length
+        return prompt_embeds.to(device=device, dtype=dtype), text_input_ids, text_tokenized_length
 
     def encode_prompt(
         self,
@@ -272,7 +272,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         encoder,
         num_images_per_prompt=1,
         negative_prompt=None,
-        return_length=False,
+        return_tokenizer_output=False,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         lora_scale: Optional[float] = None,
@@ -297,8 +297,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
                 less than `1`).
-            return_length (`bool`, *optional*):
-                return length of tokenized prompt
+            return_tokenizer_output (`bool`, *optional*):
+                return tokenized prompt ids and lengths
             prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
@@ -339,15 +339,20 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
 
         if encoder.config_class == CLIPVisionConfig:
-            tokenized_length = None
+            tokenized_prompt_ids = None
+            tokenized_prompt_length = None
             if prompt_embeds is None:
                 prompt_embeds = self._get_image_embeddings(prompt, encoder, device, dtype)
         else:
             if prompt_embeds is None:
-                prompt_embeds, tokenized_length = self._get_text_embeddings(prompt, encoder, self.tokenizer.model_max_length, device=device, dtype=dtype)
+                prompt_embeds, tokenized_prompt_ids, tokenized_prompt_length = self._get_text_embeddings(prompt, encoder, self.tokenizer.model_max_length, device=device, dtype=dtype)
             else:
-                tokenized_length = self.tokenizer(prompt if prompt is not None else "", padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_length=True, return_tensors="pt").length
-            tokenized_length = tokenized_length.repeat_interleave(num_images_per_prompt, 0)
+                tokenized_prompt = self.tokenizer(prompt if prompt is not None else "", padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_length=True, return_tensors="pt")
+                tokenized_prompt_ids = tokenized_prompt.input_ids.to(device=device)
+                tokenized_prompt_length = tokenized_prompt.length - 2
+
+            tokenized_prompt_ids = tokenized_prompt_ids.repeat_interleave(num_images_per_prompt, 0)
+            tokenized_prompt_length = tokenized_prompt_length.repeat_interleave(num_images_per_prompt, 0)
 
         prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt,0)
 
@@ -371,7 +376,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 if isinstance(self, TextualInversionLoaderMixin):
                     uncond_tokens = self.maybe_convert_prompt(uncond_tokens, self.tokenizer)
     
-                negative_prompt_embeds, _ = self._get_text_embeddings(uncond_tokens, encoder, max_length=prompt_embeds.shape[1], check_truncation=False, device=device, dtype=dtype)
+                negative_prompt_embeds, _, _ = self._get_text_embeddings(uncond_tokens, encoder, max_length=prompt_embeds.shape[1], check_truncation=False, device=device, dtype=dtype)
 
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             negative_prompt_embeds = negative_prompt_embeds.repeat_interleave(num_images_per_prompt, 0)
@@ -386,8 +391,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             output = prompt_embeds
         else:
             output = (prompt_embeds, negative_prompt_embeds)
-        if return_length:
-            output = output, tokenized_length
+        if return_tokenizer_output:
+            output = output, tokenized_prompt_ids, tokenized_prompt_length
 
         return output
 
@@ -1021,15 +1026,17 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             self.num_focus_prompts = 0
 
         if enable_prompt_focus:
-            # initialize mask smoother, attention store and mod the unet 
-            self.smoothing = GaussianSmoothing(device)
-            self.atten_cum_map = torch.tensor([], device=device)
-            self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance)
+            # initialize mask smoother, attention store and mod the unet
+            self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance, device=device)
+            self.attn_cum_map = torch.tensor([], device=device)
+            self.attn_cum_filter = torch.tensor([], device=device)
+            self.attn_filter = None
+            self.attn_mask = None
             self.mod_unet()
 
         # 3. Encode input prompt
         text_encoder_lora_scale = self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
-        prompt_embeds = self.encode_prompt(
+        prompt_embeds, prompt_ids, _ = self.encode_prompt(
             prompt,
             device,
             do_classifier_free_guidance,
@@ -1040,6 +1047,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             negative_prompt_embeds=negative_prompt_embeds,
             lora_scale=text_encoder_lora_scale,
             clip_skip=self.clip_skip,
+            return_tokenizer_output=True,
             return_tuple=False
         )  # (cfg*b*1*n,seq,hid)
         
@@ -1076,14 +1084,14 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             # flatten batched lists of focus prompts
             if batch_size > 1 and self.num_focus_prompts > 1:
                 focus_prompt = [p for batch in focus_prompt for p in batch]
-            focus_prompt_embeds, focus_prompt_lengths  = self.encode_prompt(
+            focus_prompt_embeds, focus_prompt_ids, focus_prompt_lengths = self.encode_prompt(
                 focus_prompt,
                 device,
                 False,
                 self.text_encoder,
                 num_images_per_prompt=num_images_per_prompt,
                 prompt_embeds=focus_prompt_embeds,
-                return_length=True,
+                return_tokenizer_output=True,
                 return_tuple=False
             )  # (1*b*fp*n,seq,hid)
             # list of prompts in one batch for which the cross attention is stored by the AttentionStore (debug helper)
@@ -1194,6 +1202,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         is_unet_compiled = is_compiled_module(self.unet)
         is_controlnet_compiled = is_compiled_module(self.controlnet)
         is_torch_higher_equal_2_1 = is_torch_version(">=", "2.1")
+
+        attn_th, res, block_positions, filter_th = 0.92, 16, ["up"], 0.00
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Relevant thread: https://dev-discuss.pytorch.org/t/cudagraphs-in-pytorch-2-0/1428
@@ -1290,25 +1300,14 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     denoised_latents = (1 - latents_inpaint_mask) * init_noisy_latents + latents_inpaint_mask * denoised_latents
 
                 if enable_prompt_focus:
-                    atten_threshold_c, res, block_positions = 0.9, 16, ["up", "down"]
-                    attn_mask = torch.zeros((batch_size * num_images_per_prompt, 1, res, res), device=device)
-                    for stored_prompt_index in range(1, 1+self.num_focus_prompts):  # skip main prompt and cycle only focus prompts
-                        focus_prompt_index = stored_prompt_index - 1
-                        out = self.attention_store.aggregate_attention(attention_maps=self.attention_store.step_store,
-                                                                       res=res, from_where=block_positions,
-                                                                       is_cross=True, select=stored_prompt_index)
-                        # average over all tokens (do it batch-wise) # 0 -> startoftext
-                        attn_map = torch.stack([out[b, :, :, 1:1 + len_per_batch[focus_prompt_index]].mean(2) \
-                                        for b, len_per_batch in enumerate(focus_prompt_lengths.chunk(batch_size*num_images_per_prompt))], 0)
-                        # gaussian_smoothing
-                        attn_map = F.pad(attn_map.unsqueeze(1), (1, 1, 1, 1), mode="reflect")
-                        attn_map = self.smoothing(attn_map).squeeze(1)
-                        # create binary mask
-                        tmp = torch.quantile(attn_map.flatten(start_dim=1).to(torch.float32), atten_threshold_c,dim=1).to(attn_map.dtype)
-                        attn_mask = torch.logical_or(attn_mask, torch.where(attn_map >= tmp.unsqueeze(1).unsqueeze(1).repeat(1, *attn_map.shape[-2:]), 1.0, 0.0).unsqueeze(1))
-                    self.attn_mask = attn_mask  # store for immediate use
-                    self.atten_cum_map = torch.cat([self.atten_cum_map, attn_mask]).sum(0, keepdim=True)  # (viz helper)
-                    # reset accumulated attention maps in the store 
+                    tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
+                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(block_positions, res, 0, tokens_position, attn_th)
+                    self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
+                    self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
+
+                    self.attn_mask = attn_mask.unsqueeze(1)  # store to be used in next step
+                    self.attn_cum_map = attn_mask if self.attn_cum_map.size(0) == 0 else torch.stack([self.attn_cum_map, attn_mask]).sum(0)  # (viz helper)
+                    # reset accumulated attention maps in the store
                     self.attention_store.step(False)
 
                 # Cycle and callbacks

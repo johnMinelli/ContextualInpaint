@@ -7,13 +7,34 @@ import math
 
 
 class AttentionStore():
-    def __init__(self, store_averaged_over_steps: bool, batch_size=1, classifier_free_guidance: bool = False):
+    def __init__(self, store_averaged_over_steps: bool, batch_size=1, classifier_free_guidance: bool = False, device="cuda"):
         self.step_store = self.get_empty_store()
         self.attention_store = []
         self.cur_step = 0
         self.average = store_averaged_over_steps
         self.batch_size = batch_size
         self.cfg = classifier_free_guidance
+        self.smoothing = GaussianSmoothing(device, 3, 2)
+
+    def attach_unet(self, unet):
+            attn_procs = {}
+            for name in unet.attn_processors.keys():
+                if name.startswith("mid_block"):
+                    place_in_unet = "mid"
+                elif name.startswith("up_blocks"):
+                    place_in_unet = "up"
+                elif name.startswith("down_blocks"):
+                    place_in_unet = "down"
+                else:
+                    continue
+
+                # Replace attention module
+                if "attn2" in name:
+                    attn_procs[name] = CrossAttnProcessor(attention_store=self, place_in_unet=place_in_unet)
+                else:
+                    attn_procs[name] = AttnProcessor()
+
+            unet.set_attn_processor(attn_procs)
 
     @staticmethod
     def get_empty_store():
@@ -28,10 +49,7 @@ class AttentionStore():
         attn = torch.stack(attn.split(self.batch_size)).permute(1, 0, 2, 3) # create batch_size dimension
         attn = attn[:, skip * num_heads:].reshape(self.batch_size, -1, num_heads, *attn.shape[-2:])  # create num_heads dimension
         # attn.shape = batch_size, (inbatch_size - skip), num_heads, seq_len query, seq_len_key
-        self.forward(
-            attn,
-            is_cross,
-            place_in_unet)
+        self.forward(attn, is_cross, place_in_unet)
 
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
@@ -65,19 +83,19 @@ class AttentionStore():
             attention = self.attention_store[step]
         return attention
 
-    def aggregate_attention(self, attention_maps, res: int, from_where: List[str], is_cross: bool, select: int):
+    def aggregate_attention(self, attention_maps, block_positions: List[str], res: int, is_cross: bool, select: int):
         """From stored attention maps, aggregate the ones specified by `from_where` with given resolution `res`
             across the different attention heads
         :param attention_maps: Attention maps stored
         :param res: Resolution of the block to consider
-        :param from_where: List of possible blocks from which the attention has been captured [`up`, `down`, `mid`]
+        :param block_positions: List of possible blocks from which the attention has been captured [`up`, `down`, `mid`]
         :param is_cross: Weather the aggregation should be over `cross` or `self` attention maps
         :param select: Prompt index for which aggregate the attention maps 
         :return: 
         """
         out = [[] for x in range(self.batch_size)]
         num_pixels = res ** 2
-        for location in from_where:
+        for location in block_positions:
             for att_item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
                 # cycle over the batch dimension  (b*n,p,head_dim,h*w,hid)
                 for batch, item in enumerate(att_item):
@@ -90,12 +108,26 @@ class AttentionStore():
         # average over heads
         out = out.sum(1) / out.shape[1]
         return out
-
     
+    def get_cross_attention_mask(self, block_positions, res, stored_attention_index, token_positions, attention_mask_threshold):
+        out = self.aggregate_attention(attention_maps=self.step_store, res=res, block_positions=block_positions, is_cross=True, select=stored_attention_index)
+        # average over all tokens (do it batch-wise) # 0 -> startoftext
+        attn_map = torch.stack([out[b_nim, :, :, mask].mean(2) for b_nim, mask in enumerate(token_positions)], 0)
+        # gaussian_smoothing
+        smooth_attn_map = F.pad(attn_map.unsqueeze(1), (1, 1, 1, 1), mode="reflect")
+        smooth_attn_map = self.smoothing(smooth_attn_map).squeeze(1)
+        # create binary mask
+        tmp = torch.quantile(smooth_attn_map.flatten(start_dim=1).to(torch.float32), attention_mask_threshold, dim=1).to(smooth_attn_map.dtype)
+        # attn_mask = torch.where(attn_map >= tmp.unsqueeze(1).unsqueeze(1).repeat(1, *attn_map.shape[-2:]), 1.0,0.0).unsqueeze(1)
+        attn_mask = torch.round(torch.sigmoid(10.0 * (smooth_attn_map - tmp.unsqueeze(1).unsqueeze(1).repeat(1, *smooth_attn_map.shape[-2:]))))
+        
+        return attn_mask, attn_map
+
+
 class CrossAttnProcessor:
 
     def __init__(self, attention_store, place_in_unet):
-        self.attnstore = attention_store
+        self.attn_store = attention_store
         self.place_in_unet = place_in_unet
 
     def __call__(
@@ -132,7 +164,7 @@ class CrossAttnProcessor:
         value = attn.head_to_batch_dim(value)
 
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
-        self.attnstore(attention_probs, is_cross=True, place_in_unet=self.place_in_unet, num_heads=attn.heads)
+        self.attn_store(attention_probs, is_cross=True, place_in_unet=self.place_in_unet, num_heads=attn.heads)
         hidden_states = torch.bmm(attention_probs, value)
         
         hidden_states = attn.batch_to_head_dim(hidden_states)
@@ -147,7 +179,7 @@ class CrossAttnProcessor:
 
 
 # Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionAttendAndExcitePipeline.GaussianSmoothing
-class GaussianSmoothing():
+class GaussianSmoothing:
 
     def __init__(self, device, kernel_size=3, sigma=0.5):
         kernel_size = [kernel_size, kernel_size]
@@ -155,7 +187,7 @@ class GaussianSmoothing():
 
         # The gaussian kernel is the product of the gaussian function of each dimension.
         kernel = 1
-        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
+        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32, device=device) for size in kernel_size])
         for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
             mean = (size - 1) / 2
             kernel *= 1 / (std * math.sqrt(2 * math.pi)) * torch.exp(-(((mgrid - mean) / (2 * std)) ** 2))
@@ -167,7 +199,7 @@ class GaussianSmoothing():
         kernel = kernel.view(1, 1, *kernel.size())
         kernel = kernel.repeat(1, *[1] * (kernel.dim() - 1))
 
-        self.weight = kernel.to(device)
+        self.weight = kernel
 
     def __call__(self, input):
         """
