@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -203,9 +204,9 @@ def create_prompt_llava(args: argparse.Namespace):
     input_folder = args.get("input_path", DATA_PATH)+"/"
     root_out = args.get("output_path", DATA_PATH)+"/"
 
-    conditioning_folder = conditioning_dir = os.path.join(root_out, "poses")
-    mask_folder = mask_dir = os.path.join(root_out, "mask")
-    target_folder = target_dir = os.path.join(root_out, "target")
+    conditioning_folder = os.path.join(root_out, "poses")
+    mask_folder = os.path.join(root_out, "mask")
+    target_folder = os.path.join(root_out, "target")
     if not os.path.exists(target_folder):
         os.makedirs(target_folder)
     
@@ -215,33 +216,43 @@ def create_prompt_llava(args: argparse.Namespace):
     query = 'Provide as output ONLY THE BESTS label for the image choosing the list one of the following: "phone", "driver distracted", "driver drowsy", "driver attentive", "food or drink", "cigarette". "cigarette"=person interacting with a cigarette. "food or drink"=person interacting with foods or drinks. "phone"=person interacting with a phone. "driver attentive"=person focused watching forward with open eyes. "driver drowsy"= person with eyes closed or yawning (if drowsy not attentive or distracted). "driver distracted"=person not watching forward, or engaged in other activities, such as using a phone, eating, or smoking (if distracted not attentive or drowsy)'
     query = "provide a COMPACT and OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out of what is visible, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed"
 
+    csv_file = args.get("csv", None)
+    label_map = {}
+    if csv_file is not None:
+        with open(csv_file, "r") as file:
+            csv_reader = csv.DictReader(file)
+            for row in csv_reader:
+                label_id = row["label_id"]
+                phone_class = int(row["phone_binary"])
+                cigarette_class = int(row["cigarette_binary"])
+                food_class = int(row["food_binary"])
+                label_map[label_id] = {"phone_class": phone_class, "cigarette_class": cigarette_class, "food_class": food_class}
+
     with open(os.path.join(root_out, 'prompt.json'), 'w') as outfile:
-        # for folder_name in os.listdir(target_dir):
-            # conditioning_folder = os.path.join(conditioning_dir, folder_name)
-            # mask_folder = os.path.join(mask_dir, folder_name)
-            # target_folder = os.path.join(target_dir, folder_name)
-                print("Entering:", input_folder)
-                for filename in tqdm(os.listdir(input_folder)):
-                    if not_image(filename): continue
-                    input_file = os.path.join(input_folder, filename)
-                    conditioning_file = os.path.join(conditioning_folder, filename)
-                    mask_file = os.path.join(mask_folder, filename)
-                    target_file = os.path.join(target_folder, filename)
+        print("Entering:", input_folder)
+        for filename in tqdm(os.listdir(input_folder)):
+            if not_image(filename): continue
+            input_file = os.path.join(input_folder, filename)
+            conditioning_file = os.path.join(conditioning_folder, filename)
+            mask_file = os.path.join(mask_folder, filename)
+            target_file = os.path.join(target_folder, filename)
+            target_labels = label_map.get(os.path.splitext(filename)[0], None)
 
-                    if os.path.isfile(input_file) and os.path.exists(mask_file):
-                        if input_file != target_file:
-                            shutil.copyfile(input_file, target_file)
+            if os.path.isfile(input_file) and os.path.exists(mask_file) and target_labels is not None:
+                if input_file != target_file:
+                    shutil.copyfile(input_file, target_file)
 
-                        label = pred.predict(input_file, query, 0.7, 0.2, 512)
-                        label = (label[:-1] if label.endswith('.') else label).replace("\"", "").replace("'", "")
-                        line = {
-                            "conditioning": conditioning_file.replace(root_out,""),
-                            "mask": mask_file.replace(root_out,""),
-                            "target": target_file.replace(root_out,""),
-                            "prompt": label
-                        }
-                        json.dump(line, outfile)
-                        outfile.write('\n')
+                description = pred.predict(input_file, query, 0.7, 0.2, 512)
+                description = (description[:-1] if description.endswith('.') else description).replace("\"", "").replace("'", "")
+                line = {
+                    "conditioning": conditioning_file.replace(root_out,""),
+                    "mask": mask_file.replace(root_out,""),
+                    "target": target_file.replace(root_out,""),
+                    "prompt": description,
+                    **target_labels
+                }
+                json.dump(line, outfile)
+                outfile.write('\n')
 
 
 def create_prompt_blip(args: argparse.Namespace):
@@ -285,6 +296,7 @@ if __name__ == '__main__':
     ap.add_argument("--action", required=True, choices=['mask', 'pose', 'prompt', 'clean'], help="Choose which action to run on the data.")
     ap.add_argument("--input_path", help="Path with images to process")
     ap.add_argument("--output_path", help="Path where to save the processed output")
+    ap.add_argument("--csv", help="Path where to find associations between images and labels")
     args = vars(ap.parse_args())
 
     if args.get("action") == "mask":
