@@ -29,6 +29,9 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
+from diffusers.models.controlnet import ControlNetOutput
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
+from safetensors.torch import load_file
 
 from attenprocessor import AttentionStore
 from dataset import DiffuserDataset
@@ -103,9 +106,10 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
     neg_prompts = replicate(validation_data.get('validation_neg_prompts', []), n)
     control_prompts = replicate(validation_data.get('validation_control_prompts', []), n)
     focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
+    class_conditional = torch.tensor(validation_data.get('validation_class', [])).to(accelerator.device)
 
     image_logs = []
-    for prompt, neg_prompt, image, mask, condition, control_prompt, focus_prompt in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts):
+    for prompt, neg_prompt, image, mask, condition, control_prompt, focus_prompt, class_ in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts, class_conditional):
         image = Image.open(image).convert("RGB") if image is not None else None
         mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
         mask = Image.open(mask).convert("L") if mask is not None else None
@@ -116,7 +120,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
             pred_images = []
             for i in range(args.num_validation_images):
                 with torch.autocast(f"cuda"):
-                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, 
+                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, class_conditional=class_, 
                                           image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
                                           strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
                 pred_images.append(pred_image)
@@ -146,8 +150,9 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
 
                 formatted_images.append(wandb.Image(image, caption="Reference"))
                 for image in images:
-                    image = wandb.Image(image, caption=prompt)
-                    formatted_images.append(image)
+                    if image is not None: 
+                        image = wandb.Image(image, caption=prompt)
+                        formatted_images.append(image)
 
             tracker.log({"validation": formatted_images})
         else:
@@ -203,7 +208,7 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, apply_mask_augmentation=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
+        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, dilated_conditioning_mask=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
         self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class
@@ -227,6 +232,7 @@ class Trainer():
                 net_for_w.conv_in.weight = torch.nn.Parameter(self.unet.conv_in.weight[:,:4])
                 net_for_w.config.in_channels = 4
             self.controlnet = ControlNetModel.from_unet(net_for_w)
+            self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
 
         # `accelerate` 0.16.0 will have better support for customized saving
         if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -248,11 +254,11 @@ class Trainer():
                     model = models.pop()
                     if isinstance(model, ControlNetModel):
                         # load diffusers style into model
-                        load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                        model.register_to_config(**load_model.config)
+                        # load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                        # model.register_to_config(**load_model.config)
     
-                        model.load_state_dict(load_model.state_dict())
-                        del load_model
+                        model.load_state_dict(load_file(os.path.join(input_dir,"controlnet/diffusion_pytorch_model.safetensors")))
+                        # del load_model
 
             def enable_models_cpu_offload():
                 """
@@ -472,6 +478,8 @@ class Trainer():
                     args.sd_unlock = -1
                     self.unet.up_blocks.requires_grad_(True)
                     self.unet.conv_norm_out.requires_grad_(True)
+                    self.unet.conv_act.requires_grad_(True)
+                    self.unet.conv_out.requires_grad_(True)
                     training_nets = [self.controlnet, self.unet]
 
                 with (self.accelerator.accumulate(*training_nets)):
@@ -521,6 +529,7 @@ class Trainer():
                         noisy_latents_model_input, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states_ctrl,
                         controlnet_cond=conditioning_image,
+                        class_labels=batch["class"].squeeze(),
                         return_dict=False,
                     )
                     

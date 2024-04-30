@@ -20,12 +20,12 @@ logger = get_logger(__name__)
 
 class DiffuserDataset(Dataset):
     """ Dataset for training and validation. """
-    def __init__(self, data_dir, resolution=512, tokenizer=None, apply_transformations=False, apply_mask_augmentation=False):
+    def __init__(self, data_dir, resolution=512, tokenizer=None, apply_transformations=False, dilated_conditioning_mask=False):
         self.data_dir = data_dir
         self.resolution = resolution
         self.tokenizer = tokenizer
         self.apply_transformations = apply_transformations
-        self.apply_mask_augmentation = apply_mask_augmentation
+        self.dilated_conditioning_mask = dilated_conditioning_mask
         self.vae_scale_factor = 8  # rescale the image to be a multiple of: 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.mask_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True)
@@ -89,12 +89,13 @@ class DiffuserDataset(Dataset):
         prompt = item[self.prompt_column]
         obj_text = item.get(self.obj_text_column, "")
         obj_image = os.path.join(self.data_dir, item[self.obj_image_column]) if self.obj_image_column in item else ""
+        onehot_class = torch.tensor([1 if item.get("phone_class",0)==1 else 2 if item.get("cigarette_class",0)==1 else 3 if item.get("food_class",0)==1 else 0])
 
         try:
             target_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, target_filename)), cv2.COLOR_BGR2RGB)
             mask_image = cv2.imread(os.path.join(self.data_dir, mask_filename), cv2.IMREAD_GRAYSCALE)
-            mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.1, max_expansion_factor=1.5, patches=3)
-            if self.apply_mask_augmentation:
+            mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.2, max_expansion_factor=1.5, patches=3)
+            if self.dilated_conditioning_mask:
                 conditioning_image = cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
             else:
                 conditioning_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, mask_filename)), cv2.COLOR_BGR2RGB)
@@ -115,7 +116,7 @@ class DiffuserDataset(Dataset):
                 mask = self.tr_f(mask)
                 conditioning = self.tr_f(conditioning)
 
-        return {"image": target, "txt": prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "mask": mask}
+        return {"image": target, "txt": prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "class": onehot_class, "mask": mask}
 
 
 class ProcDataset(Dataset):
@@ -156,6 +157,7 @@ class ProcDataset(Dataset):
         control_prompt = [prompt, generated_prompt["control"]] if self.num_controlnets>1 else generated_prompt.get("control", prompt) if self.num_controlnets==1 else None
         focus_prompt = generated_prompt.get("focus", "" if self.num_controlnets>1 else None)
         neg_prompt = self.generation_template.get("neg_prompt", "")
+        onehot_class = torch.tensor([1 if generated_prompt["category"]=="phone" else 2 if generated_prompt["category"]=="cigarette" else 3 if generated_prompt["category"] in ["food", "drink"] else 0])
 
         try:
             source_image = Image.open(self.images_rgb[image_id]).convert("RGB")
@@ -172,7 +174,7 @@ class ProcDataset(Dataset):
         mask = mask_image
         mask_conditioning = mask_conditioning_image
 
-        return {"prompt":prompt, "control_prompt":control_prompt, "neg_prompt":neg_prompt, "focus_prompt":focus_prompt, "image":source, "image_name":self.images_rgb[image_id], "mask":mask, "mask_conditioning":mask_conditioning, "category":generated_prompt["category"]}
+        return {"prompt":prompt, "control_prompt":control_prompt, "neg_prompt":neg_prompt, "focus_prompt":focus_prompt, "image":source, "image_name":self.images_rgb[image_id], "class": onehot_class, "mask":mask, "mask_conditioning":mask_conditioning, "category":generated_prompt["category"]}
 
 
 if __name__ == '__main__':
