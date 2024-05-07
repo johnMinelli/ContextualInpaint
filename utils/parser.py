@@ -32,6 +32,7 @@ class Train_args:
         self.parser.add_argument("--lr_num_cycles", type=int, default=1, help="Number of hard resets of the lr in cosine_with_restarts scheduler.", )
         self.parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
         self.parser.add_argument("--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes.")
+        self.parser.add_argument("--use_classemb", action="store_true", help="Whether or not to use Class embedding conditioning for the training of the ControlNet.")
         self.parser.add_argument("--dataloader_num_workers", type=int,default=0, help=("Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."),)
         self.parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
         self.parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")

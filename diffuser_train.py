@@ -232,7 +232,8 @@ class Trainer():
                 net_for_w.conv_in.weight = torch.nn.Parameter(self.unet.conv_in.weight[:,:4])
                 net_for_w.config.in_channels = 4
             self.controlnet = ControlNetModel.from_unet(net_for_w)
-            self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
+            if args.use_classemb:
+                self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
 
         # `accelerate` 0.16.0 will have better support for customized saving
         if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -529,7 +530,7 @@ class Trainer():
                         noisy_latents_model_input, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states_ctrl,
                         controlnet_cond=conditioning_image,
-                        class_labels=batch["class"].squeeze(),
+                        class_labels=batch["class"].squeeze() if self.args.use_classemb else None,
                         return_dict=False,
                     )
                     

@@ -1,8 +1,10 @@
 ﻿import os
 
+import numpy as np
 import torch
 from PIL.Image import Image
 from diffusers.pipelines.controlnet import MultiControlNetModel
+from scipy.ndimage import binary_erosion
 from transformers import PretrainedConfig
 import torch.nn.functional as F
 
@@ -38,11 +40,15 @@ def split_multi_net(controlnet, attention_mask, encoder_hidden_states, controlne
             atten_mask = F.interpolate(attention_mask.to(torch.float32), image.shape[-2:]).expand(*image.shape)
             if len(controlnets) == 1 or i>0:
                 image = torch.logical_and(atten_mask, image>0.5).to(torch.float32)
+        # Remove class conditioning if provided but not supported
+        controlnet_args = args.copy()
+        if controlnet.class_embedding is None and controlnet_args.get("class_labels", None) is not None:
+            del controlnet_args["class_labels"]
 
         down_samples, mid_sample = controlnet(encoder_hidden_states=enc_hid_state,
                                               controlnet_cond=image,
                                               conditioning_scale=scale,
-                                              guess_mode=guess_mode, **args)
+                                              guess_mode=guess_mode, **controlnet_args)
         # # Apply attention focused mask
         # if attention_mask is not None and (len(controlnets) == 1 or i>0):
         #     # match the size and apply mask
@@ -174,7 +180,7 @@ def get_interpolated_patch(matrix, coord, p_size=2):
     return bilinear_interpolate(matrix.view(b*c,h,w), torch.stack(batched_patch_coords).repeat_interleave(c, 0)).view(b, c, p_size*2+1, p_size*2+1)
 
 
-def compute_centroid(matrix, res):
+def compute_centroid(matrix):
     # Get the batch size, height, and width of the attention map
     b, h, w = matrix.size()
 
@@ -203,3 +209,27 @@ def compute_centroid(matrix, res):
     centroid_coords = torch.stack([centroid_x, centroid_y], dim=1)
 
     return centroid_coords
+
+
+def select_random_point_on_border(mask, padding=50):
+    batch_size, height, width = mask.shape
+
+    # Create a new mask with padding near the margins
+    padded_mask = torch.zeros_like(mask)
+    padded_mask[:, padding:height-padding, padding:width-padding] = 1
+
+    # Apply element-wise AND operation between the original mask and the padded mask
+    masked = torch.logical_and(mask, padded_mask)
+
+    # Apply erosion operation to reduce the active areas
+    # eroded = F.erosion2d(masked.float().unsqueeze(1), torch.ones(1, 1, padding * 2 + 1, padding * 2 + 1)).squeeze(1)
+
+    # Get the border points
+    border_points = [torch.nonzero(b) for b in masked]
+
+    # Randomly select a point from the border points
+    selected_points = torch.cat([border[torch.randint(0, border.size(0), (1,))] for border in border_points])
+    
+    return selected_points
+
+
