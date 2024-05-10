@@ -90,11 +90,12 @@ class DiffuserDataset(Dataset):
         obj_text = item.get(self.obj_text_column, "")
         obj_image = os.path.join(self.data_dir, item[self.obj_image_column]) if self.obj_image_column in item else ""
         onehot_class = torch.tensor([1 if item.get("phone_class",0)==1 else 2 if item.get("cigarette_class",0)==1 else 3 if item.get("food_class",0)==1 else 0])
+        prompt_class = "Image of a person with " + ("phone" if item.get("phone_class",0)==1 else "cigarette" if item.get("cigarette_class",0)==1 else "food" if item.get("food_class",0)==1 else "nothing") + " in the hands, "
 
         try:
             target_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, target_filename)), cv2.COLOR_BGR2RGB)
             mask_image = cv2.imread(os.path.join(self.data_dir, mask_filename), cv2.IMREAD_GRAYSCALE)
-            mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.2, max_expansion_factor=1.5, patches=3)
+            mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.1, max_expansion_factor=1.5, patches=2)
             if self.dilated_conditioning_mask:
                 conditioning_image = cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
             else:
@@ -116,7 +117,28 @@ class DiffuserDataset(Dataset):
                 mask = self.tr_f(mask)
                 conditioning = self.tr_f(conditioning)
 
-        return {"image": target, "txt": prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "class": onehot_class, "mask": mask}
+            # object_downscaling
+            mask_array = mask.squeeze(0).numpy()
+            object_area = np.sum(mask_array == 1)
+            total_area = mask_array.size
+            object_area_ratio = object_area / total_area
+            # Calculate the padding size based on the scale factor
+            if object_area_ratio > 0.1:
+                scale_factor = np.sqrt(0.1 / object_area_ratio)
+                padding_width = int(target.size(2) * (1 - scale_factor) / 2)
+                padding_height = int(target.size(1) * (1 - scale_factor) / 2)
+                # Apply padding to the target image
+                padding_transform = transforms.Pad((padding_width, padding_height), fill=0)
+                target = padding_transform(target)
+                mask = padding_transform(mask)
+                conditioning = padding_transform(conditioning)
+                # Resize the images back to the original dimensions
+                resize_transform = transforms.Resize((target_image.shape[0], target_image.shape[1]))
+                target = resize_transform(target)
+                mask = resize_transform(mask)
+                conditioning = resize_transform(conditioning)
+
+        return {"image": target, "txt": prompt_class+prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "class": onehot_class, "mask": mask}
 
 
 class ProcDataset(Dataset):
