@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import torch
+from torchvision.transforms.functional import pil_to_tensor
 from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
@@ -38,9 +39,9 @@ def clean_preprocessed_data(args):
             mask_path = os.path.join(root.replace("source", "mask"), filename)
             pose_path = os.path.join(root.replace("source", "poses"), filename)
             try:
-                rgb_im = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
+                rgb_im = cv2.imread(rgb_path)
                 mask_im = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                pose_im = cv2.cvtColor(cv2.imread(pose_path), cv2.COLOR_BGR2RGB)
+                pose_im = cv2.imread(pose_path)
                 shape = rgb_im.shape
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
