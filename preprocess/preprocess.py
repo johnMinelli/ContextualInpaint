@@ -103,6 +103,7 @@ def run_masking(args: argparse.Namespace):
     # Create output folder if not exist
     source_folder = os.path.join(args.get("output_path", DATA_PATH), "source")
     mask_folder = os.path.join(args.get("output_path", DATA_PATH), "mask")
+    target_folder = os.path.join(args.get("output_path", DATA_PATH), "target")
     if not os.path.exists(source_folder):
         os.makedirs(source_folder)
     if not os.path.exists(mask_folder):
