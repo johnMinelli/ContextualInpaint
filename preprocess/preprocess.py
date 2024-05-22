@@ -107,6 +107,8 @@ def run_masking(args: argparse.Namespace):
         os.makedirs(source_folder)
     if not os.path.exists(mask_folder):
         os.makedirs(mask_folder)
+    if not os.path.exists(target_folder):
+        os.makedirs(target_folder)
 
     # Create masked source files
     if os.path.exists(os.path.join(args.get("input_path", DATA_PATH), "target")):
@@ -119,6 +121,7 @@ def run_masking(args: argparse.Namespace):
             if not_image(filename): continue      
 
             try:
+                target_im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
                 rgb_im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
             except Exception as e:
                 print("ERR: reading", os.path.join(root, filename), str(e))
@@ -151,6 +154,7 @@ def run_masking(args: argparse.Namespace):
             # Save
             plt.imsave(os.path.join(source_folder, filename), rgb_im)
             plt.imsave(os.path.join(mask_folder, filename), mask_im)
+            plt.imsave(os.path.join(target_folder, filename), target_im)
 
 
 def run_pose_estimation(args: argparse.Namespace):
