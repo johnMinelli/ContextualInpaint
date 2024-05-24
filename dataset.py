@@ -38,7 +38,7 @@ class DiffuserDataset(Dataset):
 
         self.image_column = "target"
         self.prompt_column = "prompt"
-        self.conditioning_image_column = "conditioning"
+        self.conditioning_image_column = "mask"
         self.mask_column = "mask"
         self.obj_text_column = "obj_text"
         self.obj_image_column = "obj_image"

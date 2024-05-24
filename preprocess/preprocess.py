@@ -37,12 +37,11 @@ def clean_preprocessed_data(args):
             if not_image(filename): continue
             rgb_path = os.path.join(root, filename)
             mask_path = os.path.join(root.replace("source", "mask"), filename)
-            pose_path = os.path.join(root.replace("source", "poses"), filename)
             try:
                 rgb_im = cv2.imread(rgb_path)
                 mask_im = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                pose_im = cv2.imread(pose_path)
                 shape = rgb_im.shape
+                if rgb_im is None or mask_im is None: raise Exception()
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
@@ -51,20 +50,17 @@ def clean_preprocessed_data(args):
                 # right crop
                 rgb_im = rgb_im[:,-shape[0]:]
                 mask_im = mask_im[:,-shape[0]:]
-                pose_im = pose_im[:,-shape[0]:]
                 if np.sum(mask_im[:,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))>0.16 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))<0.85:
                     # resize
                     rgb_im = cv2.resize(rgb_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
-                    pose_im = cv2.resize(pose_im, (512, 512))
                     # save
                     cv2.imwrite(rgb_path, rgb_im)
                     cv2.imwrite(mask_path, mask_im)
-                    cv2.imwrite(pose_path, pose_im)
                 else:
-                    remove([rgb_path, mask_path, pose_path])
+                    remove([rgb_path, mask_path])
             else:
-                remove([rgb_path, mask_path, pose_path])
+                remove([rgb_path, mask_path])
 
     root = args.get("input_path", DATA_PATH)
     if os.path.exists(os.path.join(root, "prompt.json")):
@@ -210,7 +206,6 @@ def create_prompt_llava(args: argparse.Namespace):
     input_folder = args.get("input_path", DATA_PATH)+"/"
     root_out = args.get("output_path", DATA_PATH)+"/"
 
-    conditioning_folder = os.path.join(root_out, "poses")
     mask_folder = os.path.join(root_out, "mask")
     target_folder = os.path.join(root_out, "target")
     if not os.path.exists(target_folder):
@@ -239,7 +234,6 @@ def create_prompt_llava(args: argparse.Namespace):
         for filename in tqdm(os.listdir(input_folder)):
             if not_image(filename): continue
             input_file = os.path.join(input_folder, filename)
-            conditioning_file = os.path.join(conditioning_folder, filename)
             mask_file = os.path.join(mask_folder, filename)
             target_file = os.path.join(target_folder, filename)
             target_labels = label_map.get(os.path.splitext(filename)[0], None)
@@ -251,7 +245,7 @@ def create_prompt_llava(args: argparse.Namespace):
                 description = pred.predict(input_file, query, 0.7, 0.2, 512)
                 description = (description[:-1] if description.endswith('.') else description).replace("\"", "").replace("'", "")
                 line = {
-                    "conditioning": conditioning_file.replace(root_out,""),
+                    "conditioning": mask_file.replace(root_out,""),
                     "mask": mask_file.replace(root_out,""),
                     "target": target_file.replace(root_out,""),
                     "prompt": description,
@@ -273,23 +267,21 @@ def create_prompt_blip(args: argparse.Namespace):
 
     with open(os.path.join(root, 'prompt_blip.json'), 'w') as outfile:
         for folder_name in os.listdir(target_dir):
-            conditioning_folder = os.path.join(conditioning_dir, folder_name)
             mask_folder = os.path.join(mask_dir, folder_name)
             target_folder = os.path.join(target_dir, folder_name)
 
-            if os.path.isdir(conditioning_folder) and os.path.isdir(target_folder):
+            if os.path.isdir(target_folder):
                 print("Entering:", target_folder)
                 for filename in tqdm(os.listdir(target_folder)):
                     if not_image(filename): continue
-                    conditioning_file = os.path.join(conditioning_folder, filename)
                     mask_file = os.path.join(mask_folder, filename)
                     target_file = os.path.join(target_folder, filename)
         
-                    if os.path.isfile(conditioning_file) and os.path.isfile(target_file):
+                    if os.path.isfile(target_file):
                         label = pred(target_file)[0]['generated_text']
                         label = (label[:-1] if label.endswith('.') else label)+", extremely detailed, photorealistic."
                         label = label.replace("\"", "").replace("'", "")
-                        line = {"conditioning": conditioning_file.replace(root,""),
+                        line = {"conditioning": mask_file.replace(root,""),
                                   "mask": mask_file.replace(root,""),
                                   "target": target_file.replace(root,""),
                                   "prompt": label}
