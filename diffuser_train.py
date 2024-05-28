@@ -29,8 +29,8 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from diffusers.models.controlnet import ControlNetOutput
-from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
+from diffusers.loaders import LoraLoaderMixin
+from peft import LoraConfig, set_peft_model_state_dict
 from safetensors.torch import load_file
 
 from attenprocessor import AttentionStore
@@ -46,7 +46,7 @@ import diffusers
 from diffusers import (AutoencoderKL, ControlNetModel,StableDiffusionControlNetImg2ImgPipeline,
                        StableDiffusionControlNetInpaintPipeline, UNet2DConditionModel, UniPCMultistepScheduler, DDPMScheduler)
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import check_min_version, is_wandb_available, convert_unet_state_dict_to_peft
 from diffusers.utils.import_utils import is_xformers_available
 
 from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
@@ -234,6 +234,14 @@ class Trainer():
             self.controlnet = ControlNetModel.from_unet(net_for_w)
             if args.use_classemb:
                 self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
+
+        if args.lora is not None:
+            unet_lora_config = LoraConfig(r=256, lora_alpha=256, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
+            self.unet.add_adapter(unet_lora_config)
+            lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(args.lora)
+            unet_state_dict = {f'{k.replace("unet.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")}
+            unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
+            b = set_peft_model_state_dict(self.unet, unet_state_dict, adapter_name="default")
 
         # `accelerate` 0.16.0 will have better support for customized saving
         if version.parse(accelerate.__version__) >= version.parse("0.16.0"):

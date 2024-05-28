@@ -45,6 +45,7 @@ class Train_args:
         self.parser.add_argument("--logging_dir", type=str, default="logs", help=("[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."),)
         self.parser.add_argument("--allow_tf32", action="store_true", help=("Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"),)
         self.parser.add_argument("--log", type=str, default=None, help=('The integration to report the results and logs to. Supported platforms are `"tensorboard"` (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'),)
+        self.parser.add_argument("--lora", type=str, default=None, help=('LoRA model checkpoint to use for training'),)
         self.parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"], help=(
                 "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
                 " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
