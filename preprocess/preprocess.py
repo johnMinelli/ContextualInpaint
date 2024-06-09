@@ -94,7 +94,7 @@ def run_masking(args: argparse.Namespace):
         r = requests.get('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', allow_redirects=True)
         open(sam_model_path, 'wb').write(r.content)
     else: print("Using SAM model cached.")
-    sam = sam_model_registry["vit_h"](checkpoint=sam_model_path).to(device=torch.device('cuda:0'))
+    sam = sam_model_registry["vit_h"](checkpoint=sam_model_path).cuda()
     mask_predictor = SamPredictor(sam)
     # Create output folder if not exist
     source_folder = os.path.join(args.get("output_path", DATA_PATH), "source")
@@ -215,7 +215,6 @@ def create_prompt_llava(args: argparse.Namespace):
     pred.setup()
     query = "follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
     query = 'Provide as output ONLY THE BESTS label for the image choosing the list one of the following: "phone", "driver distracted", "driver drowsy", "driver attentive", "food or drink", "cigarette". "cigarette"=person interacting with a cigarette. "food or drink"=person interacting with foods or drinks. "phone"=person interacting with a phone. "driver attentive"=person focused watching forward with open eyes. "driver drowsy"= person with eyes closed or yawning (if drowsy not attentive or distracted). "driver distracted"=person not watching forward, or engaged in other activities, such as using a phone, eating, or smoking (if distracted not attentive or drowsy)'
-    query = "provide a COMPACT and OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out of what is visible, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed"
 
     csv_file = args.get("csv", None)
     label_map = {}
@@ -241,6 +240,9 @@ def create_prompt_llava(args: argparse.Namespace):
             if os.path.isfile(input_file) and os.path.exists(mask_file) and target_labels is not None:
                 if input_file != target_file:
                     shutil.copyfile(input_file, target_file)
+
+                item = "phone" if target_labels["phone_class"]==1 else "cigarette/cigar/vape" if target_labels["cigarette_class"] else "food/drink" if target_labels["food_class"] else "nothing"
+                query = f"provide an OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out of what is visible, mention {item} in hand, make a sentence with present participle verbs and indeterminate article. Max 180 characters allowed"
 
                 description = pred.predict(input_file, query, 0.7, 0.2, 512)
                 description = (description[:-1] if description.endswith('.') else description).replace("\"", "").replace("'", "")

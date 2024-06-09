@@ -67,8 +67,7 @@ class Predictor(BasePredictor):
         #     download_weights(weight["src"], weight["dest"], weight["files"])
         # disable_torch_init()
 
-        self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
-            "4bit/llava-v1.5-13b-3GB", model_name="llava-v1.5-13b", model_base=None, load_8bit=False, load_4bit=True)
+        self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model("liuhaotian/llava-v1.6-vicuna-7b", model_name="liuhaotian/llava-v1.6-vicuna-7b", model_base=None, load_8bit=False, load_4bit=False)
 
     def predict(self, image: Path = Input(description="Input image"),
             prompt: str = Input(description="Prompt to use for text generation"), top_p: float = Input(
@@ -80,7 +79,7 @@ class Predictor(BasePredictor):
                                     default=1024, ge=0), ) -> ConcatenateIterator[str]:
         """Run a single prediction on the model"""
 
-        conv_mode = "llava_v1"
+        conv_mode = "v1_mmtag"
         conv = conv_templates[conv_mode].copy()
 
         image_data = load_image(str(image))
