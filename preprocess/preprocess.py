@@ -250,7 +250,7 @@ def create_prompt_llava(args: argparse.Namespace):
                     "conditioning": mask_file.replace(root_out,""),
                     "mask": mask_file.replace(root_out,""),
                     "target": target_file.replace(root_out,""),
-                    "prompt": description,
+                    "prompt": description+f", {item} in hand",
                     **target_labels
                 }
                 json.dump(line, outfile)
