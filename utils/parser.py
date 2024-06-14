@@ -68,6 +68,8 @@ class Train_args:
         self.parser.add_argument("--validation_steps", type=int, default=200000000, help="Run validation every X steps. Validation consists of running the prompt `args.validation_prompt` multiple times: `args.num_validation_images` and logging the images.")
         self.parser.add_argument("--tracker_project_name", type=str, default="train_controlnet", help="The `project_name` argument passed to Accelerator.init_trackers for more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator")
         self.parser.add_argument("--rank", type=int, default=4, help="The dimension of the LoRA update matrices.")
+        self.parser.add_argument("--alpha_rank", type=int, default=4, help="The weight scaling LoRA update matrices.")
+        self.parser.add_argument("--lycorice_algo", type=str, default="full", help="The algorithm used for LyCORICE library.")
         self.parser.add_argument("--dist_match", type=float, default=0.05, help="If add distribution match loss, and what's the weight")
     def parse_args(self, input_args=None):
         if input_args is not None:

@@ -124,7 +124,7 @@ class DiffuserDataset(Dataset):
             object_area_ratio = object_area / total_area
             # Calculate the padding size based on the scale factor
             if object_area_ratio > 0.1:
-                scale_factor = np.sqrt(0.1 / object_area_ratio)
+                scale_factor = np.sqrt(0.05 / object_area_ratio)
                 padding_width = int(target.size(2) * (1 - scale_factor) / 2)
                 padding_height = int(target.size(1) * (1 - scale_factor) / 2)
                 # Apply padding to the target image
@@ -159,6 +159,9 @@ class ProcDataset(Dataset):
     def __len__(self):
         return self.num_images
 
+    def update_cat_proportions(self, proportions):
+        self.categories = proportions
+
     def generate_prompt(self, json_template):
         category = np.random.choice(list(self.categories.keys()), p=list(self.categories.values()))
         gender = np.random.choice(json_template["gender"])
@@ -176,7 +179,7 @@ class ProcDataset(Dataset):
 
         generated_prompt = self.generate_prompt(self.generation_template)
         prompt = generated_prompt.get("prompt", None)
-        control_prompt = [prompt, generated_prompt["control"]] if self.num_controlnets>1 else generated_prompt.get("control", prompt) if self.num_controlnets==1 else None
+        control_prompt = [generated_prompt.get("prompt", None), generated_prompt["control"]] if self.num_controlnets>1 else generated_prompt.get("control", prompt) if self.num_controlnets==1 else None
         focus_prompt = generated_prompt.get("focus", "" if self.num_controlnets>1 else None)
         neg_prompt = self.generation_template.get("neg_prompt", "")
         onehot_class = torch.tensor([1 if generated_prompt["category"]=="phone" else 2 if generated_prompt["category"]=="cigarette" else 3 if generated_prompt["category"] in ["food", "drink"] else 0])

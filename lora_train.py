@@ -31,6 +31,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers.loaders import AttnProcsLayers, LoraLoaderMixin
 from diffusers.models.attention_processor import LoRAAttnProcessor
+from lycoris import create_lycoris, LycorisNetwork
 from diffusers.training_utils import cast_training_params
 from peft import set_peft_model_state_dict, get_peft_model_state_dict
 
