@@ -237,19 +237,7 @@ class Trainer():
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if self.accelerator.is_main_process:
-                # there are only two options here. Either are just the unet attn processor layers
-                # or there are the unet and text encoder atten layers
-                unet_lora_layers_to_save = None
-                for model in models:
-                    if isinstance(model, type(unwrap_model(self.unet))):
-                        unet_lora_layers_to_save = convert_state_dict_to_diffusers(get_peft_model_state_dict(model))
-                    else:
-                        raise ValueError(f"unexpected save model: {model.__class__}")
-
-                    # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
-
-                LoraLoaderMixin.save_lora_weights(output_dir, unet_lora_layers=unet_lora_layers_to_save)
+                torch.save(self.lyco.state_dict(), os.path.join(output_dir, "lycorice.ckpt"))
 
         def load_model_hook(models, input_dir):
             unet_ = None
@@ -263,21 +251,8 @@ class Trainer():
                 else:
                     raise ValueError(f"unexpected save model: {model.__class__}")
 
-            lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(input_dir)
-
-            unet_state_dict = {f'{k.replace("unet.", "")}': v for k, v in lora_state_dict.items() if
-                               k.startswith("unet.")}
-            unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
-            incompatible_keys = set_peft_model_state_dict(unet_, unet_state_dict, adapter_name="default")
-
-            if incompatible_keys is not None:
-                # check only for unexpected keys
-                unexpected_keys = getattr(incompatible_keys, "unexpected_keys", None)
-                if unexpected_keys:
-                    logger.warning(
-                        f"Loading adapter weights from state_dict led to unexpected keys not found in the model: "
-                        f" {unexpected_keys}. ")
-
+            lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))
+            self.lyco.load_state_dict(lyco_state)
             # Make sure the trainable params are in float32. This is again needed since the base models
             # are in `weight_dtype`. More details:
             # https://github.com/huggingface/diffusers/pull/6514#discussion_r1449796804
@@ -296,7 +271,12 @@ class Trainer():
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         self.unet.train()
-    
+
+        LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
+        self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
+        self.lyco.apply_to()
+        self.lyco = self.lyco.cuda()
+
         # Setup LoRA weights to the attention layers
         # It's important to realize here how many attention weights will be added and of which sizes
         # The sizes of the attention layers consist only of two different variables:
@@ -309,11 +289,11 @@ class Trainer():
         # - mid blocks (2x attention layers) * (1x transformer layers) * (1x mid blocks) = 2
         # - up blocks (2x attention layers) * (3x transformer layers) * (3x down blocks) = 18
         # => 32 layers
-        from peft import LoraConfig, PeftModel, get_peft_model
-
-        unet_lora_config = LoraConfig(r=args.rank, lora_alpha=args.rank, init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
-        self.unet.add_adapter(unet_lora_config)
+        # from peft import LoraConfig, PeftModel, get_peft_model
+        # 
+        # unet_lora_config = LoraConfig(r=args.rank, lora_alpha=args.rank, init_lora_weights="gaussian",
+        #     target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
+        # self.unet.add_adapter(unet_lora_config)
     
         # # Set correct lora layers
         # lora_attn_procs = {}
@@ -371,7 +351,7 @@ class Trainer():
             optimizer_class = torch.optim.AdamW
 
         self.optimizer = optimizer_class(
-            list(filter(lambda p: p.requires_grad, self.unet.parameters())),
+            list(filter(lambda p: p.requires_grad, self.lyco.parameters())),
             lr=args.learning_rate,
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
@@ -506,7 +486,7 @@ class Trainer():
                         mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, 1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
 
                     encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
-                    
+
                     if self.args.enable_cpu_offload:
                         torch.cuda.empty_cache()
 
@@ -530,7 +510,7 @@ class Trainer():
                         raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
 
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-    
+
                     # Dist Matching Loss
                     dist_loss = F.mse_loss(noise_pred.float().sum(dim=0), target.float().sum(dim=0), reduction="mean")
                     loss = loss + (dist_loss * args.dist_match)
@@ -598,6 +578,6 @@ if __name__ == "__main__":
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
-    
+
     args.drag_attention = False
     Trainer(args).train()
