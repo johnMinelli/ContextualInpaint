@@ -45,7 +45,7 @@ RUN pip install -e LLaVA_repo
 RUN pip install git+https://github.com/facebookresearch/segment-anything.git
 
 RUN git clone https://github.com/johnMinelli/ContextualInpaint.git
-RUN pip install -r ContextualInpaint/requirements.txt
+RUN cat ContextualInpaint/requirements.txt | xargs -n 1 -L 1 pip install
 
 WORKDIR /home/appuser/ContextualInpaint/preprocess
 
