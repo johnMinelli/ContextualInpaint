@@ -1,6 +1,6 @@
 ﻿bitsandbytes==0.35.4
 einops==0.4.1
-transformers
+transformers==4.34.0
 huggingface-hub
 httpx==0.24.1
 gradio_client==0.5.0
