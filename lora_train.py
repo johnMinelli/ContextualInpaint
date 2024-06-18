@@ -282,7 +282,7 @@ class Trainer():
         # The sizes of the attention layers consist only of two different variables:
         # 1) - the "hidden_size", which is increased according to `unet.config.block_out_channels`.
         # 2) - the "cross attention size", which is set to `unet.config.cross_attention_dim`.
-    
+
         # Let's first see how many attention processors we will have to set.
         # For Stable Diffusion, it should be equal to:
         # - down blocks (2x attention layers) * (2x transformer layers) * (3x down blocks) = 12
@@ -294,7 +294,7 @@ class Trainer():
         # unet_lora_config = LoraConfig(r=args.rank, lora_alpha=args.rank, init_lora_weights="gaussian",
         #     target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
         # self.unet.add_adapter(unet_lora_config)
-    
+
         # # Set correct lora layers
         # lora_attn_procs = {}
         # for name in self.unet.attn_processors.keys():
@@ -327,7 +327,7 @@ class Trainer():
                 self.unet.enable_xformers_memory_efficient_attention()
             else:
                 raise ValueError("xformers is not available. Make sure it is installed correctly")
-    
+
         # Enable TF32 for faster training on Ampere GPUs,
         # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
         if args.allow_tf32:
