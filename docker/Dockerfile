@@ -46,6 +46,7 @@ RUN pip install git+https://github.com/facebookresearch/segment-anything.git
 
 RUN git clone https://github.com/johnMinelli/ContextualInpaint.git
 RUN cat ContextualInpaint/requirements.txt | xargs -n 1 -L 1 pip install
+RUN pip install lycoris_lora==2.2.0.post3
 
 WORKDIR /home/appuser/ContextualInpaint/preprocess
 

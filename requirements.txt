@@ -18,4 +18,3 @@ peft==0.11.1
 transformers==4.34.0
 huggingface-hub==0.23.3
 tokenizers==0.19.1
-lycoris_lora==2.2.0.post3
