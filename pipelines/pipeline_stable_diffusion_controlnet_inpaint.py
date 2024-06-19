@@ -345,7 +345,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 prompt_embeds = self._get_image_embeddings(prompt, encoder, device, dtype)
         else:
             if prompt_embeds is None:
-                prompt_embeds, tokenized_prompt_ids, tokenized_prompt_length = self._get_text_embeddings(prompt, encoder, self.tokenizer.model_max_length, device=device, dtype=dtype)
+                prompt_embeds, tokenized_prompt_ids, tokenized_prompt_length = self._get_text_embeddings(prompt, encoder, self.tokenizer.model_max_length, check_truncation=False, device=device, dtype=dtype)
             else:
                 tokenized_prompt = self.tokenizer(prompt if prompt is not None else "", padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_length=True, return_tensors="pt")
                 tokenized_prompt_ids = tokenized_prompt.input_ids.to(device=device)
@@ -371,11 +371,11 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         " the batch size of `prompt`."
                     )
                 else: uncond_tokens = negative_prompt
-    
+
                 # textual inversion: process multi-vector tokens if necessary
                 if isinstance(self, TextualInversionLoaderMixin):
                     uncond_tokens = self.maybe_convert_prompt(uncond_tokens, self.tokenizer)
-    
+
                 negative_prompt_embeds, _, _ = self._get_text_embeddings(uncond_tokens, encoder, max_length=prompt_embeds.shape[1], check_truncation=False, device=device, dtype=dtype)
 
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
