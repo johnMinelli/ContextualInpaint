@@ -30,6 +30,7 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers.loaders import LoraLoaderMixin
+from lycoris import LycorisNetwork, create_lycoris
 from peft import LoraConfig, set_peft_model_state_dict
 from safetensors.torch import load_file
 
@@ -124,7 +125,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
                                           image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
                                           strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
                 pred_images.append(pred_image)
-    
+
             image_logs.append({"reference": image, "images": pred_images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
 
     for tracker in accelerator.trackers:
@@ -227,6 +228,24 @@ class Trainer():
             self.controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
         else:
             logger.info("Initializing controlnet weights from unet")
+
+            if args.lora is not None:
+                # unet_lora_config = LoraConfig(r=256, lora_alpha=256, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
+                # self.unet.add_adapter(unet_lora_config)
+                # lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(args.lora)
+                # unet_state_dict = {f'{k.replace("unet.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")}
+                # unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
+                # b = set_peft_model_state_dict(self.unet, unet_state_dict, adapter_name="default")
+                self.unet.cuda()
+                LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
+                lyco = create_lycoris(self.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
+                lyco.apply_to()
+                lyco_state = torch.load(os.path.join(args.lora, "lycorice.ckpt"), map_location=torch.device("cuda"))
+                lyco.load_state_dict(lyco_state)
+                lyco.restore()
+                lyco = lyco.cuda()
+                lyco.merge_to(1.0)
+
             net_for_w = copy.deepcopy(self.unet)
             if self.unet.config.in_channels != 4:
                 net_for_w.conv_in.weight = torch.nn.Parameter(self.unet.conv_in.weight[:,:4])
@@ -234,14 +253,6 @@ class Trainer():
             self.controlnet = ControlNetModel.from_unet(net_for_w)
             if args.use_classemb:
                 self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
-
-        if args.lora is not None:
-            unet_lora_config = LoraConfig(r=256, lora_alpha=256, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
-            self.unet.add_adapter(unet_lora_config)
-            lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(args.lora)
-            unet_state_dict = {f'{k.replace("unet.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")}
-            unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
-            b = set_peft_model_state_dict(self.unet, unet_state_dict, adapter_name="default")
 
         # `accelerate` 0.16.0 will have better support for customized saving
         if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -541,14 +552,14 @@ class Trainer():
                         class_labels=batch["class"].squeeze() if self.args.use_classemb else None,
                         return_dict=False,
                     )
-                    
+
                     if self.args.enable_cpu_offload:
                         torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
                         if TRAIN_OBJ_MASKING:
-                            mid_block_res_sample = mask_block(mask, mid_block_res_sample)
-                            down_block_res_samples = [mask_block(mask, block) for block in down_block_res_samples]
+                            mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
+                            down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
                         noisy_latents_model_input = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
 
                     # Predict the noise residual

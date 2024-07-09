@@ -237,7 +237,7 @@ class Trainer():
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if self.accelerator.is_main_process:
-                torch.save(self.lyco.state_dict(), os.path.join(output_dir, "lycorice.ckpt"))
+                self.lyco.save_weights(os.path.join(output_dir, "lycorice.ckpt"), None, None)
 
         def load_model_hook(models, input_dir):
             unet_ = None
@@ -272,7 +272,7 @@ class Trainer():
         self.text_encoder.requires_grad_(False)
         self.unet.train()
 
-        LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
+        LycorisNetwork.apply_preset({"target_name": [".*.*"]})
         self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
         self.lyco.apply_to()
         self.lyco = self.lyco.cuda()
@@ -373,7 +373,7 @@ class Trainer():
             num_cycles=args.lr_num_cycles,
             power=args.lr_power,
         )
-        
+
         # For mixed precision training we cast the text_encoder and vae weights to half-precision
         # as these models are only used for inference, keeping weights in full precision is not required.
         self.weight_dtype = torch.float32

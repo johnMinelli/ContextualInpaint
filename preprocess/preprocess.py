@@ -110,12 +110,12 @@ def run_masking(args: argparse.Namespace):
     # Create masked source files
     if os.path.exists(os.path.join(args.get("input_path", DATA_PATH), "target")):
         print("'target' folder will be used as input path.")
-        args.input_path = os.path.join(args.get("input_path", DATA_PATH), "target")
+        args["input_path"] = os.path.join(args.get("input_path", DATA_PATH), "target")
     for root, dirs, files in os.walk(args.get("input_path", DATA_PATH)):
-        if len(files)==0: continue
+        if len(files) == 0: continue
         print("Entering folder:", root)
         for filename in tqdm(files):
-            if not_image(filename): continue      
+            if not_image(filename): continue
 
             try:
                 target_im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
@@ -138,7 +138,7 @@ def run_masking(args: argparse.Namespace):
             # combine masks and dilate
             pred_mask_bool = pred_masks.sum(0).bool().cpu()
             pred_mask_bool = cv2.dilate(pred_mask_bool.numpy().astype(np.uint8) * 255, dil_kernel, iterations=2) > 0
-            
+
             # v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
             # out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
             # plt.imshow(pred_masks)
@@ -168,13 +168,13 @@ def run_pose_estimation(args: argparse.Namespace):
 
     if os.path.exists(os.path.join(args.get("input_path", DATA_PATH), "target")):
         print("'target' folder will be used as input path.")
-        args.input_path = os.path.join(args.get("input_path", DATA_PATH), "target")
+        args["input_path"] = os.path.join(args.get("input_path", DATA_PATH), "target")
     for root, dirs, files in os.walk(args.get("input_path", DATA_PATH)):
         if len(files)==0: continue
         print("Entering:", root)
         for filename in tqdm(files):
             if not_image(filename): continue
-            
+
             try:
                 im = cv2.cvtColor(cv2.imread(os.path.join(root, filename)), cv2.COLOR_BGR2RGB)
             except Exception as e:
@@ -200,17 +200,100 @@ def run_pose_estimation(args: argparse.Namespace):
             # Save
             plt.imsave(os.path.join(poses_folder, filename), out)
 
+def run_object_detection(args: argparse.Namespace):
+    import torch
+    import csv
+    from PIL import Image
+    from lang_sam import LangSAM
+
+    def check_overlap(hand_boxes, obj_boxes):
+        hand_centers_x = (hand_boxes[:, 0] + hand_boxes[:, 2]) / 2
+        hand_centers_y = (hand_boxes[:, 1] + hand_boxes[:, 3]) / 2
+        hand_sizes_x = hand_boxes[:, 2] - hand_boxes[:, 0]
+        hand_sizes_y = hand_boxes[:, 3] - hand_boxes[:, 1]
+        max_distances = (torch.max(hand_sizes_x, hand_sizes_y) / 2) * 2
+
+        obj_centers_x = (obj_boxes[:, 0] + obj_boxes[:, 2]) / 2
+        obj_centers_y = (obj_boxes[:, 1] + obj_boxes[:, 3]) / 2
+        obj_sizes_x = obj_boxes[:, 2] - obj_boxes[:, 0]
+        obj_sizes_y = obj_boxes[:, 3] - obj_boxes[:, 1]
+        # max_obj_distances = (torch.max(obj_sizes_x, obj_sizes_y) / 2) + 10
+
+        distances = torch.sqrt((hand_centers_x[:, None] - obj_centers_x[None, :]) ** 2 + (hand_centers_y[:, None] - obj_centers_y[None, :]) ** 2)
+        return torch.any(distances < max_distances[:, None], 0)
+
+    model = LangSAM()
+
+    root = args.get("input_path", DATA_PATH)
+    if not os.path.exists(os.path.join(root, "obj_mask")):
+        os.makedirs(os.path.join(root, "obj_mask"))
+
+    csv_file = args.get("csv", None)
+    label_map = {}
+    if csv_file is not None:
+        with open(csv_file, "r") as file:
+            csv_reader = csv.DictReader(file)
+            for row in csv_reader:
+                label_id = row["label_id"]
+                phone_class = int(row["phone_binary"])
+                cigarette_class = int(row["cigarette_binary"])
+                food_class = int(row["food_binary"])
+                label_map[label_id] = {"phone_class": phone_class, "cigarette_class": cigarette_class, "food_class": food_class}
+
+    with torch.no_grad():
+        if os.path.exists(os.path.join(root, "prompt.json")):
+            updated_lines = []
+            # read lines
+            with open(os.path.join(root, "prompt.json"), 'r') as file:
+                lines = file.readlines()
+            # check file existence for each line 
+            for line in lines:
+                json_data = json.loads(line)
+                if os.path.exists(os.path.join(root, json_data["target"])) and os.path.exists(os.path.join(root, json_data["mask"])):
+                    target_labels = label_map.get(os.path.splitext(json_data["target"].split("/")[-1])[0], None)
+                    # read target
+                    input_file = os.path.join(root, json_data["target"])
+                    image_pil = Image.open(input_file).convert("RGB")
+                    # read mask
+                    input_file = os.path.join(root, json_data["mask"])
+                    mask_pil = Image.open(input_file).convert("L")
+                    # make detection
+                    text_prompt = 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
+                    obj_mask = torch.zeros((mask_pil.height, mask_pil.width), dtype=torch.bool)
+                    if text_prompt != '':
+                        masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.")
+                        idx_objects = [l in list(filter(lambda x: x != "" and x != ", ", text_prompt.split("."))) for i, l in enumerate(phrases) ]
+                        hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
+                        if any(idx_objects) and len(hands) != 0:
+                            segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
+                            obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
+                    # save detection
+                    obj_mask_file = input_file.replace("mask", "obj_mask")
+                    plt.imsave(obj_mask_file, obj_mask.cpu())
+                    json_data["obj_mask"] = obj_mask_file.replace(root, "")
+                    updated_lines.append(str(json_data)+"\n")
+
+        # overwrite the json
+        with open(os.path.join(root, "prompt.json"), 'w') as file:
+            for line in updated_lines:
+                json.dump(line, file)
+                file.write('\n')
+
+
 
 def create_prompt_llava(args: argparse.Namespace):
     from llava_predictor import Predictor
+
+    if os.path.exists(os.path.join(args.get("input_path", DATA_PATH), "target")):
+        print("'target' folder will be used as input path.")
+        args["input_path"] = os.path.join(args.get("input_path", DATA_PATH), "target")
     input_folder = args.get("input_path", DATA_PATH)+"/"
     root_out = args.get("output_path", DATA_PATH)+"/"
-
     mask_folder = os.path.join(root_out, "mask")
     target_folder = os.path.join(root_out, "target")
     if not os.path.exists(target_folder):
         os.makedirs(target_folder)
-    
+
     pred = Predictor()
     pred.setup()
     query = "follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
@@ -278,7 +361,7 @@ def create_prompt_blip(args: argparse.Namespace):
                     if not_image(filename): continue
                     mask_file = os.path.join(mask_folder, filename)
                     target_file = os.path.join(target_folder, filename)
-        
+
                     if os.path.isfile(target_file):
                         label = pred(target_file)[0]['generated_text']
                         label = (label[:-1] if label.endswith('.') else label)+", extremely detailed, photorealistic."
@@ -293,7 +376,7 @@ def create_prompt_blip(args: argparse.Namespace):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument("--action", required=True, choices=['mask', 'pose', 'prompt', 'clean'], help="Choose which action to run on the data.")
+    ap.add_argument("--action", required=True, choices=['mask', 'pose', 'prompt', 'clean', 'obj_mask'], help="Choose which action to run on the data.")
     ap.add_argument("--input_path", help="Path with images to process")
     ap.add_argument("--output_path", help="Path where to save the processed output")
     ap.add_argument("--csv", help="Path where to find associations between images and labels")
@@ -307,3 +390,5 @@ if __name__ == '__main__':
         create_prompt_llava(args)
     if args.get("action") == "clean":
         clean_preprocessed_data(args)
+    if args.get("action") == "obj_mask":
+        run_object_detection(args)
