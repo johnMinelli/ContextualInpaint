@@ -199,7 +199,7 @@ def compute_centroid(matrix):
     weighted_sum_y = torch.sum(map_values_flat * y_grid_flat.unsqueeze(0), dim=1)
 
     # Compute the total sum of map values
-    total_sum = torch.sum(map_values_flat, dim=1)
+    total_sum = torch.sum(map_values_flat, dim=1)+torch.finfo(torch.float32).eps
 
     # Compute the centroid coordinates
     centroid_x = (weighted_sum_y / total_sum)

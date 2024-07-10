@@ -224,7 +224,7 @@ def run_object_detection(args: argparse.Namespace):
 
     model = LangSAM()
 
-    root = args.get("input_path", DATA_PATH)
+    root = args.get("input_path", DATA_PATH)+"/"
     if not os.path.exists(os.path.join(root, "obj_mask")):
         os.makedirs(os.path.join(root, "obj_mask"))
 
@@ -243,6 +243,7 @@ def run_object_detection(args: argparse.Namespace):
     with torch.no_grad():
         if os.path.exists(os.path.join(root, "prompt.json")):
             updated_lines = []
+            objects_identified = {}
             # read lines
             with open(os.path.join(root, "prompt.json"), 'r') as file:
                 lines = file.readlines()
@@ -265,19 +266,20 @@ def run_object_detection(args: argparse.Namespace):
                         idx_objects = [l in list(filter(lambda x: x != "" and x != ", ", text_prompt.split("."))) for i, l in enumerate(phrases) ]
                         hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
                         if any(idx_objects) and len(hands) != 0:
+                            objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1
                             segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
                             obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
                     # save detection
                     obj_mask_file = input_file.replace("mask", "obj_mask")
                     plt.imsave(obj_mask_file, obj_mask.cpu())
                     json_data["obj_mask"] = obj_mask_file.replace(root, "")
-                    updated_lines.append(str(json_data)+"\n")
-
+                    updated_lines.append(json_data)
+        print(objects_identified)
         # overwrite the json
-        with open(os.path.join(root, "prompt.json"), 'w') as file:
+        with open(os.path.join(root, "prompt.json"), 'w') as outfile:
             for line in updated_lines:
-                json.dump(line, file)
-                file.write('\n')
+                json.dump(line, outfile)
+                outfile.write('\n')
 
 
 
