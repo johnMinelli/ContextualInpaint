@@ -272,7 +272,7 @@ class Trainer():
         self.text_encoder.requires_grad_(False)
         self.unet.train()
 
-        LycorisNetwork.apply_preset({"target_name": [".*.*"]})
+        LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
         self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
         self.lyco.apply_to()
         self.lyco = self.lyco.cuda()
@@ -509,12 +509,17 @@ class Trainer():
                     else:
                         raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
 
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-
+                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                    # Object loss enhance
+                    if batch.get("obj_mask", None) is not None:
+                        obj_mask = torch.nn.functional.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
+                        obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
+                        loss += loss*obj_mask*0.1
                     # Dist Matching Loss
-                    dist_loss = F.mse_loss(noise_pred.float().sum(dim=0), target.float().sum(dim=0), reduction="mean")
-                    loss = loss + (dist_loss * args.dist_match)
+                    # dist_loss = F.mse_loss(noise_pred.float().sum(dim=0), target.float().sum(dim=0), reduction="none")
+                    # loss = loss + (dist_loss * args.dist_match)
 
+                    loss = loss.mean()
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
                         params_to_clip = list(filter(lambda p: p.requires_grad, self.unet.parameters()))

@@ -42,6 +42,7 @@ class DiffuserDataset(Dataset):
         self.mask_column = "mask"
         self.obj_text_column = "obj_text"
         self.obj_image_column = "obj_image"
+        self.obj_mask_column = "obj_mask"
 
         # Preprocessing the datasets.
         self._image_transforms = transforms.Compose(
@@ -54,7 +55,7 @@ class DiffuserDataset(Dataset):
         )
 
         self._conditioning_image_transforms = transforms.Compose(
-            [   
+            [
                 transforms.ToTensor(),
                 transforms.Resize(self.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 # transforms.CenterCrop(args.resolution),
@@ -62,21 +63,6 @@ class DiffuserDataset(Dataset):
         )
         self.tr_g = transforms.Grayscale()
         self.tr_f = transforms.RandomHorizontalFlip(p=1)
-
-    def _tokenize_prompt(self, sample_prompt, is_train=True):
-        if np.random.random() < self.proportion_empty_prompts:
-            prompt = ""
-        elif isinstance(sample_prompt, str):
-            prompt = sample_prompt
-        elif isinstance(sample_prompt, (list, np.ndarray)):
-            # take a random caption if there are multiple
-            prompt = np.random.choice(sample_prompt) if is_train else sample_prompt[0]
-        else:
-            raise ValueError(
-                f"The prompt for the sample provided {sample_prompt} should contain either strings or lists of strings."
-            )
-        inputs = self.tokenizer([prompt], max_length=self.tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt")
-        return inputs.input_ids[0]
 
     def __len__(self):
         return len(self.data)
@@ -86,16 +72,20 @@ class DiffuserDataset(Dataset):
         target_filename = item[self.image_column]
         mask_filename = item[self.mask_column]
         conditioning_filename = item[self.conditioning_image_column]
-        prompt = item[self.prompt_column]
+        prompt_image = item[self.prompt_column]
         obj_text = item.get(self.obj_text_column, "")
         obj_image = os.path.join(self.data_dir, item[self.obj_image_column]) if self.obj_image_column in item else ""
-        onehot_class = torch.tensor([1 if item.get("phone_class",0)==1 else 2 if item.get("cigarette_class",0)==1 else 3 if item.get("food_class",0)==1 else 0])
-        prompt_class = "Image of a person with " + ("phone" if item.get("phone_class",0)==1 else "cigarette" if item.get("cigarette_class",0)==1 else "food" if item.get("food_class",0)==1 else "nothing") + " in the hands, "
+        obj_mask_filename = item.get(self.obj_mask_column, None)
+        class_id = torch.tensor([1 if item.get("phone_class",0)==1 else 2 if item.get("cigarette_class",0)==1 else 3 if item.get("food_class",0)==1 else 0])
+        prompt_class = "" if item.get("phone_class",0)+item.get("cigarette_class",0)+item.get("food_class",0)==0 else \
+            ("Image of a person with " + ("phone" if item.get("phone_class",0)==1 else "cigarette" if item.get("cigarette_class",0)==1 else "food" if item.get("food_class",0)==1 else "nothing") + " in the hands, ")
 
         try:
             target_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, target_filename)), cv2.COLOR_BGR2RGB)
             mask_image = cv2.imread(os.path.join(self.data_dir, mask_filename), cv2.IMREAD_GRAYSCALE)
             mask_image = mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_factor=1.1, max_expansion_factor=1.5, patches=2)
+            obj_mask_image = cv2.imread(os.path.join(self.data_dir, obj_mask_filename), cv2.IMREAD_GRAYSCALE) if obj_mask_filename is not None else None
+            # we use the mask as conditioning for the controlnet
             if self.dilated_conditioning_mask:
                 conditioning_image = cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
             else:
@@ -107,6 +97,7 @@ class DiffuserDataset(Dataset):
         # Preprocessing (color,dims,dtype,resize) and normalize: control images ∈ [0, 1] and images to encode ∈ [-1, 1]
         target = self.image_processor.preprocess(target_image/255., height=self.resolution, width=self.resolution).squeeze(0)
         mask = self.mask_processor.preprocess(mask_image/255., height=self.resolution, width=self.resolution).squeeze(0)
+        obj_mask = self.mask_processor.preprocess(obj_mask_image/255., height=self.resolution, width=self.resolution).squeeze(0) if obj_mask_image is not None else None
         conditioning = self.conditioning_image_processor.preprocess(conditioning_image/255., height=self.resolution, width=self.resolution).squeeze(0)
 
         if self.apply_transformations:
@@ -138,7 +129,9 @@ class DiffuserDataset(Dataset):
                 mask = resize_transform(mask)
                 conditioning = resize_transform(conditioning)
 
-        return {"image": target, "txt": prompt_class+prompt, "no_txt": "", "ctrl_txt": obj_text, "ctrl_txt_image": obj_image, "conditioning": conditioning, "class": onehot_class, "mask": mask}
+        return {"image": target, "txt": prompt_class+prompt_image, "no_txt": "", "mask": mask, **({"obj_mask": obj_mask} if obj_mask is not None else {}),
+                "ctrl_txt": obj_text, "ctrl_txt_image": obj_image,  "conditioning": conditioning,
+                "class": class_id}
 
 
 class ProcDataset(Dataset):
