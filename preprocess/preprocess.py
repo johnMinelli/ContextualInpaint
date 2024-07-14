@@ -259,7 +259,7 @@ def run_object_detection(args: argparse.Namespace):
                     input_file = os.path.join(root, json_data["mask"])
                     mask_pil = Image.open(input_file).convert("L")
                     # make detection
-                    text_prompt = 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
+                    text_prompt = '' if target_labels is None else 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
                     obj_mask = torch.zeros((mask_pil.height, mask_pil.width), dtype=torch.bool)
                     if text_prompt != '':
                         masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.")

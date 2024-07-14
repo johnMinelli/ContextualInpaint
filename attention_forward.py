@@ -29,7 +29,7 @@ def new_forward(self, hidden_states: torch.FloatTensor, encoder_hidden_states: O
         batch_size, sequence_length, _ = (
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
-        
+
         t = cross_attention_kwargs.get("t", 1000)
         cfg = cross_attention_kwargs.get("cfg", True)
 
@@ -70,7 +70,7 @@ def new_forward(self, hidden_states: torch.FloatTensor, encoder_hidden_states: O
             value_split = rearrange(value, "(b f) h d c -> b f h d c", f=num_frames)
             value_ref = rearrange(value_split[:, :1], "b f h d c -> (b f) h d c")
             value_side = rearrange(value_split[:, 1:], "b f h d c -> (b f) h d c")
-            
+
             # Compute cross hiddens (backprop branch) for side
             _, hidden_states_side = scaled_dot_product_attention(query_side, key_side, value_side, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
 
