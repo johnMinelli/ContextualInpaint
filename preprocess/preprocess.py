@@ -265,21 +265,23 @@ def run_object_detection(args: argparse.Namespace):
             # read lines
             with open(os.path.join(root, "prompt.json"), 'r') as file:
                 lines = file.readlines()
-            # check file existence for each line 
+            # check file existence for each line
             for line in lines:
                 json_data = json.loads(line)
                 if os.path.exists(os.path.join(root, json_data["target"])) and os.path.exists(os.path.join(root, json_data["mask"])):
                     target_labels = label_map.get(os.path.splitext(json_data["target"].split("/")[-1])[0], None)
                     # read target
-                    input_file = os.path.join(root, json_data["target"])
-                    image_pil = Image.open(input_file).convert("RGB")
+                    target_file = os.path.join(root, json_data["target"])
+                    image_pil = Image.open(target_file).convert("RGB")
                     # read mask
-                    input_file = os.path.join(root, json_data["mask"])
-                    mask_pil = Image.open(input_file).convert("L")
+                    mask_file = os.path.join(root, json_data["mask"])
+                    mask_pil = Image.open(mask_file).convert("L")
+                    # NOTE: not considering the obj distance to person mask
+                    assert image_pil.height==mask_pil.height and image_pil.width==mask_pil.width, "Image and mask must be the same size"
                     # make detection
                     text_prompt = '' if target_labels is None else 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
-                    obj_mask = torch.zeros((mask_pil.height, mask_pil.width), dtype=torch.bool)
-                    obj = torch.ones((mask_pil.height, mask_pil.width, 3))
+                    obj_mask = torch.zeros((image_pil.height, image_pil.width), dtype=torch.bool)
+                    obj = torch.ones((image_pil.height, image_pil.width, 3))
                     if text_prompt != '':
                         masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.")
                         idx_objects = [l in list(filter(lambda x: x != "" and x != ", ", text_prompt.split("."))) for i, l in enumerate(phrases) ]
@@ -290,10 +292,10 @@ def run_object_detection(args: argparse.Namespace):
                             obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
                             obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
                     # save detection
-                    obj_mask_file = input_file.replace("mask", "obj_mask")
-                    plt.imsave(obj_mask_file, obj_mask.cpu())
+                    obj_mask_file = mask_file.replace("mask", "obj_mask")
+                    plt.imsave(obj_mask_file, obj_mask.cpu().numpy())
                     subfolder = '' if target_labels is None else '/phone' if target_labels["phone_class"] == 1 else '/cigarette' if target_labels["cigarette_class"] == 1 else '/food' if target_labels["food_class"] == 1 else ''
-                    plt.imsave(input_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
+                    plt.imsave(mask_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
                     json_data["obj_mask"] = obj_mask_file.replace(root, "")
                     updated_lines.append(json_data)
         print(objects_identified)
