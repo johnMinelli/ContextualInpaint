@@ -227,6 +227,11 @@ def run_object_detection(args: argparse.Namespace):
     root = args.get("input_path", DATA_PATH)+"/"
     if not os.path.exists(os.path.join(root, "obj_mask")):
         os.makedirs(os.path.join(root, "obj_mask"))
+    if not os.path.exists(os.path.join(root, "obj")):
+        os.makedirs(os.path.join(root, "obj"))
+        os.makedirs(os.path.join(root, "obj/food"))
+        os.makedirs(os.path.join(root, "obj/cigarette"))
+        os.makedirs(os.path.join(root, "obj/phone"))
 
     csv_file = args.get("csv", None)
     label_map = {}
@@ -261,6 +266,7 @@ def run_object_detection(args: argparse.Namespace):
                     # make detection
                     text_prompt = '' if target_labels is None else 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
                     obj_mask = torch.zeros((mask_pil.height, mask_pil.width), dtype=torch.bool)
+                    obj = torch.ones((mask_pil.height, mask_pil.width, 3))
                     if text_prompt != '':
                         masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.")
                         idx_objects = [l in list(filter(lambda x: x != "" and x != ", ", text_prompt.split("."))) for i, l in enumerate(phrases) ]
@@ -269,9 +275,12 @@ def run_object_detection(args: argparse.Namespace):
                             objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1
                             segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
                             obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
+                            obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
                     # save detection
                     obj_mask_file = input_file.replace("mask", "obj_mask")
                     plt.imsave(obj_mask_file, obj_mask.cpu())
+                    subfolder = '' if target_labels is None else '/phone' if target_labels["phone_class"] == 1 else '/cigarette' if target_labels["cigarette_class"] == 1 else '/food' if target_labels["food_class"] == 1 else ''
+                    plt.imsave(input_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
                     json_data["obj_mask"] = obj_mask_file.replace(root, "")
                     updated_lines.append(json_data)
         print(objects_identified)
