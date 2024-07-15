@@ -31,7 +31,7 @@ Or run them in the container to make temporary changes.
 
 ### Build docker file
 cd docker
-sudo docker build --tag vzc-preprocessing .
+sudo docker build --tag vzc-preprocessing . --no-cache
 ### (optional) push it online
 sudo docker login
 sudo docker tag vzc-preprocessing johnminelli/vzc-preprocessing 
@@ -39,7 +39,7 @@ sudo docker push johnminelli/vzc-preprocessing
 ### Create a container from the image
 sudo docker run --name container -v /data01/gio/ctrl/a:/mounted_input -v /data01/gio/ctrl/b:/mounted_output -dit --rm --gpus all vzc-preprocessing
 ### Execute the container with terminal attached
-sudo docker exec -it container sh
+sudo docker exec -it container bash
 
 ```
 python preprocess.py --action mask --input_path /mounted_input --output_path /mounted_output

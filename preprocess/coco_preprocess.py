@@ -66,13 +66,14 @@ def run_data_filter(args: argparse.Namespace):
                         print("Missing segmentation key in dataset", inst["image_id"]); continue
 
                     if USE_LLAVA_CAPTIONER:
-                        query = f"Provide a COMPACT and OBJECTIVE caption to describe the image without hallucinating or making hypothesis out what is visible, focus on {cats[instance_cat_id]} object, use noun phrase with present participle verbs and indeterminate article. Maximum 180 characters allowed."
+                        query = f"Provide an OBJECTIVE caption for the action currently performed in the image by a person without hallucinating or making hypothesis out of what is visible, describe and make sure to mention the object {cats[instance_cat_id]}, if in hand append {cats[instance_cat_id]} in hand, make a sentence with present participle verbs and indeterminate article. Max 180 characters allowed"
+
                         prompt = llava_pred.predict(os.path.join(args.input_path, im_dict["file"]), query, 0.7, 0.2, 512)
                         prompt = (prompt[:-1] if prompt.endswith('.') else prompt).replace("\"", "").replace("'", "")
                     else:
                         valid_captions = [cats[instance_cat_id] in c.lower() or cats[instance_cat_id].strip() in c.lower() for c in im_dict["captions"]]
                         prompt = im_dict["captions"][np.argmin(valid_captions)] if any(valid_captions) else None
-                    
+
                     if prompt is not None:  # else reject
                         try:
                             image = cv2.imread(os.path.join(args.input_path, im_dict["file"]))
@@ -113,11 +114,16 @@ def run_data_filter(args: argparse.Namespace):
                             cv2.imwrite(os.path.join(args.output_path, mask_path), mask)
                             source_path = os.path.join("source", os.path.basename(im_dict["file"]))
                             cv2.imwrite(os.path.join(args.output_path, source_path), image)
-
+                            if "phone" in im_dict["file"]:
+                                p,c,f = 1,0,0
+                            elif "cigarette" in im_dict["file"]:
+                                p,c,f = 0,1,0
+                            else:
+                                p,c,f = 0,0,1
                             # append info
                             line = {"conditioning":mask_path, "mask":mask_path,
                                     "target":target_image, "prompt":prompt,
-                                    "obj_text":cats[instance_cat_id], "obj_image":object_path}
+                                    "obj_text":cats[instance_cat_id], "obj_image":object_path, "phone_class":p,"cigarette_class":c,"food_class":f}
                             json.dump(line, outfile)
                             outfile.write('\n')
 

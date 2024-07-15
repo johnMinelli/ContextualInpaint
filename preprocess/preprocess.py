@@ -35,28 +35,40 @@ def clean_preprocessed_data(args):
         print("Entering folder:", root)
         for filename in tqdm(files):
             if not_image(filename): continue
+            # read the images
             rgb_path = os.path.join(root, filename)
+            target_path = os.path.join(root.replace("source", "target"), filename)
+            pose_path = os.path.join(root.replace("source", "poses"), filename)
             mask_path = os.path.join(root.replace("source", "mask"), filename)
             try:
                 rgb_im = cv2.imread(rgb_path)
+                target_im = cv2.imread(target_path)
                 mask_im = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                shape = rgb_im.shape
-                if rgb_im is None or mask_im is None: raise Exception()
+                pose_im = cv2.imread(pose_path) if os.path.exists(pose_path) else None
+                if rgb_im is None or target_im is None or mask_im is None: raise Exception()
             except Exception as e:
                 print("ERR", os.path.join(root, filename), str(e))
                 continue
-            mask_im = cv2.threshold(mask_im,50,255,cv2.THRESH_BINARY)[1]
+            # binarize the mask and apply filtering/preprocessing
+            mask_im = cv2.threshold(mask_im,50,255, cv2.THRESH_BINARY)[1]
             if np.any(mask_im==255):
                 # right crop
-                rgb_im = rgb_im[:,-shape[0]:]
-                mask_im = mask_im[:,-shape[0]:]
-                if np.sum(mask_im[:,0]>50)/shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))>0.16 and (np.sum(mask_im[:,:]>50)/(shape[0]*shape[1]))<0.85:
+                rgb_im = rgb_im[:,-rgb_im.shape[0]:]
+                target_im = target_im[:,-target_im.shape[0]:]
+                mask_im = mask_im[:,-mask_im.shape[0]:]
+                pose_im = pose_im[:,-pose_im.shape[0]:] if pose_im is not None else None
+                if np.sum(mask_im[:,0]>50)/mask_im.shape[0] < 0.5 and (np.sum(mask_im[:,:]>50)/(mask_im.shape[0]*mask_im.shape[1]))>0.16 and (np.sum(mask_im[:,:]>50)/(mask_im.shape[0]*mask_im.shape[1]))<0.85:
                     # resize
                     rgb_im = cv2.resize(rgb_im, (512, 512))
+                    target_im = cv2.resize(target_im, (512, 512))
                     mask_im = cv2.resize(mask_im, (512, 512))
+                    pose_im = cv2.resize(pose_im, (512, 512)) if pose_im is not None else None
                     # save
                     cv2.imwrite(rgb_path, rgb_im)
+                    cv2.imwrite(target_path, target_im)
                     cv2.imwrite(mask_path, mask_im)
+                    if pose_im is not None:
+                        cv2.imwrite(pose_path, pose_im)
                 else:
                     remove([rgb_path, mask_path])
             else:
@@ -200,6 +212,7 @@ def run_pose_estimation(args: argparse.Namespace):
             # Save
             plt.imsave(os.path.join(poses_folder, filename), out)
 
+
 def run_object_detection(args: argparse.Namespace):
     import torch
     import csv
@@ -289,7 +302,6 @@ def run_object_detection(args: argparse.Namespace):
             for line in updated_lines:
                 json.dump(line, outfile)
                 outfile.write('\n')
-
 
 
 def create_prompt_llava(args: argparse.Namespace):

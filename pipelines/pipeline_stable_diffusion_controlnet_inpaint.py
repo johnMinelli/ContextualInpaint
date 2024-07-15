@@ -241,7 +241,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         text_input_ids = text_inputs.input_ids.to(device=device)
 
         if check_truncation:
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids.to(device=device)
             if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
                 removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1: -1])
                 logger.warning(f"The following part of your input was truncated because CLIP can only handle sequences up to {self.tokenizer.model_max_length} tokens: {removed_text}")
@@ -638,6 +638,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             )
 
     def mod_unet(self):
+        assert self.attention_store is not None, "AttentionStore must be initialized first."
         attn_procs = {}
         for name in self.unet.attn_processors.keys():
             if name.startswith("mid_block"):
@@ -1050,7 +1051,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             return_tokenizer_output=True,
             return_tuple=False
         )  # (cfg*b*1*n,seq,hid)
-        
+
         if controlnet is not None:
             encoder = self.controlnet_text_encoder if self.controlnet_text_encoder is not None else \
                       self.controlnet_image_encoder if self.controlnet_image_encoder is not None else self.text_encoder
@@ -1060,7 +1061,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                                 [[batch] if isinstance(batch, str) else batch for batch in controlnet_prompt]
             controlnet_prompt = [p for batch in controlnet_prompt for p in batch]
             controlnet_negative_prompt = [p for batch in [[batch] * nets for batch in negative_prompt] for p in batch] if negative_prompt is not None else None
-            
+
             controlnet_prompt_embeds = self.encode_prompt(
                 controlnet_prompt,
                 device,
@@ -1079,7 +1080,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     controlnet_prompt_embeds[indices] = self.controlnet_text_encoder.text_projection(controlnet_prompt_embeds[indices]).to(controlnet_prompt_embeds.dtype)
                 else:
                     logger.warning("`controlnet_prompt_seq_projection` is True but no text_encoder with projection is given.")
-    
+
         if enable_prompt_focus:
             # flatten batched lists of focus prompts
             if batch_size > 1 and self.num_focus_prompts > 1:
@@ -1116,7 +1117,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 dtype=controlnet.dtype,
                 do_classifier_free_guidance=do_classifier_free_guidance,
                 guess_mode=guess_mode,
-            )  # (cfg*b*n,c,h,w)
+            )  # (cfg*b*mp*n,c,h,w)
 
         # Preprocess mask and image - resizes image and mask w.r.t height and width
         if image is None:
@@ -1225,7 +1226,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     control_model_input = torch.cat([noisy_latents] * (1+int(do_classifier_free_guidance and not guess_mode)))
                     control_model_input = self.scheduler.scale_model_input(control_model_input, t)
                     control_attention_mask = torch.cat([self.attn_mask] * (1+int(do_classifier_free_guidance and not guess_mode))) if self.attn_mask is not None else None  # (cfg*b*n,1,h_block,w_block)
-                    
+
                     if isinstance(controlnet_keep[i], list):
                         cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
                     else:

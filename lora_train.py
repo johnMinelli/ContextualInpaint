@@ -272,7 +272,8 @@ class Trainer():
         self.text_encoder.requires_grad_(False)
         self.unet.train()
 
-        LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
+        # LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})  # Transformer2DModel
+        LycorisNetwork.apply_preset({"target_module": ["Attention"],})
         self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
         self.lyco.apply_to()
         self.lyco = self.lyco.cuda()
