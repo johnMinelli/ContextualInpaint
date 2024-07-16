@@ -266,7 +266,7 @@ def run_object_detection(args: argparse.Namespace):
             with open(os.path.join(root, "prompt.json"), 'r') as file:
                 lines = file.readlines()
             # check file existence for each line
-            for line in lines:
+            for line in tqdm(lines):
                 json_data = json.loads(line)
                 if os.path.exists(os.path.join(root, json_data["target"])) and os.path.exists(os.path.join(root, json_data["mask"])):
                     target_labels = label_map.get(os.path.splitext(json_data["target"].split("/")[-1])[0], None)
