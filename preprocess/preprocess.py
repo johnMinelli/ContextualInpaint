@@ -279,12 +279,15 @@ def run_object_detection(args: argparse.Namespace):
                     # NOTE: not considering the obj distance to person mask
                     assert image_pil.height==mask_pil.height and image_pil.width==mask_pil.width, "Image and mask must be the same size"
                     # make detection
-                    text_prompt = '' if target_labels is None else 'phone.' if target_labels["phone_class"] == 1 else 'cigarette.' if target_labels["cigarette_class"] == 1 else 'food. drink.' if target_labels["food_class"] == 1 else ''
+                    text_prompt = '' if target_labels is None else \
+                                    'phone.' if target_labels["phone_class"] == 1 else \
+                                    'cigarette. cigar. vape.' if target_labels["food_class"] == 1 else \
+                                    'food. drink. coffee. doughnut. energy drink. sandwich. soda. can. bottle. chips. granola bar. muffin. snack. candy. bagel. biscuit. pizza. fruit. icecream. juice box. pastry. chips. smoothie.' if target_labels["food_class"] == 1 else ''
                     obj_mask = torch.zeros((image_pil.height, image_pil.width), dtype=torch.bool)
                     obj = torch.ones((image_pil.height, image_pil.width, 3))
                     if text_prompt != '':
-                        masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.")
-                        idx_objects = [l in list(filter(lambda x: x != "" and x != ", ", text_prompt.split("."))) for i, l in enumerate(phrases) ]
+                        masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.", box_threshold=0.25, text_threshold=0.25)
+                        idx_objects = [any([ll in list(filter(lambda x: x != "" and x != ", ", (text_prompt+" ").split(". "))) for ll in l.split()]) for i, l in enumerate(phrases)]
                         hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
                         if any(idx_objects) and len(hands) != 0:
                             objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1

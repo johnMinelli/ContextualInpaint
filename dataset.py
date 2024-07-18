@@ -100,6 +100,23 @@ class DiffuserDataset(Dataset):
         obj_mask = self.mask_processor.preprocess(obj_mask_image/255., height=self.resolution, width=self.resolution).squeeze(0) if obj_mask_image is not None else None
         conditioning = self.conditioning_image_processor.preprocess(conditioning_image/255., height=self.resolution, width=self.resolution).squeeze(0)
 
+        if obj_mask is not None:
+            h, w = obj_mask.shape[-2:]
+            mask_array = obj_mask.squeeze(0).numpy()
+            object_area = np.sum(mask_array == 1)
+            total_area = mask_array.size
+            object_area_ratio = object_area / total_area
+            if object_area_ratio < 0.001:
+                scale_factor = np.sqrt(0.003 / object_area_ratio)
+                padding_width = int(w * (1 - scale_factor) / 2)
+                padding_height = int(h * (1 - scale_factor) / 2)
+                # Apply padding to the target image
+                padding_transform = transforms.Pad((padding_width, padding_height), fill=0)
+                obj_mask = padding_transform(obj_mask)
+                # Resize the images back to the original dimensions
+                resize_transform = transforms.Resize((h, w))
+                obj_mask = resize_transform(obj_mask)
+
         if self.apply_transformations:
             if torch.rand(1) < 0.2:
                 target = self.tr_g(target).repeat(3,1,1)
@@ -109,6 +126,7 @@ class DiffuserDataset(Dataset):
                 conditioning = self.tr_f(conditioning)
 
             # object_downscaling
+            h, w = mask.shape[-2:]
             mask_array = mask.squeeze(0).numpy()
             object_area = np.sum(mask_array == 1)
             total_area = mask_array.size
@@ -116,15 +134,15 @@ class DiffuserDataset(Dataset):
             # Calculate the padding size based on the scale factor
             if object_area_ratio > 0.1:
                 scale_factor = np.sqrt(0.05 / object_area_ratio)
-                padding_width = int(target.size(2) * (1 - scale_factor) / 2)
-                padding_height = int(target.size(1) * (1 - scale_factor) / 2)
+                padding_width = int(w * (1 - scale_factor) / 2)
+                padding_height = int(h * (1 - scale_factor) / 2)
                 # Apply padding to the target image
                 padding_transform = transforms.Pad((padding_width, padding_height), fill=0)
                 target = padding_transform(target)
                 mask = padding_transform(mask)
                 conditioning = padding_transform(conditioning)
                 # Resize the images back to the original dimensions
-                resize_transform = transforms.Resize((target_image.shape[0], target_image.shape[1]))
+                resize_transform = transforms.Resize((h, w))
                 target = resize_transform(target)
                 mask = resize_transform(mask)
                 conditioning = resize_transform(conditioning)
