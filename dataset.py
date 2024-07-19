@@ -107,9 +107,9 @@ class DiffuserDataset(Dataset):
             total_area = mask_array.size
             object_area_ratio = object_area / total_area
             if object_area > 0 and object_area_ratio < 0.001:
-                scale_factor = np.sqrt(0.002 / object_area_ratio)
-                padding_width = int(w * (1 - scale_factor) / 2)
-                padding_height = int(h * (1 - scale_factor) / 2)
+                scale_factor = np.sqrt(object_area_ratio/0.001)
+                padding_width = int(w * (1 - scale_factor) / 2)//2
+                padding_height = int(h * (1 - scale_factor) / 2)//2
                 # Apply padding to the target image
                 padding_transform = transforms.Pad((padding_width, padding_height), fill=0)
                 obj_mask = padding_transform(obj_mask)
