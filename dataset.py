@@ -106,7 +106,7 @@ class DiffuserDataset(Dataset):
             object_area = np.sum(mask_array == 1)
             total_area = mask_array.size
             object_area_ratio = object_area / total_area
-            if object_area_ratio < 0.001:
+            if object_area > 0 and object_area_ratio < 0.001:
                 scale_factor = np.sqrt(0.003 / object_area_ratio)
                 padding_width = int(w * (1 - scale_factor) / 2)
                 padding_height = int(h * (1 - scale_factor) / 2)
