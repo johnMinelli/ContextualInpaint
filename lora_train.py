@@ -492,9 +492,6 @@ class Trainer():
                         torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
-                        # if TRAIN_OBJ_MASKING:
-                        #     mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
-                        #     down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]                        
                         noisy_latents_model_input = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
 
                     # Predict the noise residual
@@ -516,9 +513,6 @@ class Trainer():
                         obj_mask = torch.nn.functional.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
                         obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
                         loss += loss*obj_mask*0.1
-                    # Dist Matching Loss
-                    # dist_loss = F.mse_loss(noise_pred.float().sum(dim=0), target.float().sum(dim=0), reduction="none")
-                    # loss = loss + (dist_loss * args.dist_match)
 
                     loss = loss.mean()
                     self.accelerator.backward(loss)

@@ -276,12 +276,12 @@ def run_object_detection(args: argparse.Namespace):
                     # read mask
                     mask_file = os.path.join(root, json_data["mask"])
                     mask_pil = Image.open(mask_file).convert("L")
-                    # NOTE: not considering the obj distance to person mask
+                    # NOTE: not considering mask overlap but obj distance to person mask
                     assert image_pil.height==mask_pil.height and image_pil.width==mask_pil.width, "Image and mask must be the same size"
                     # make detection
                     text_prompt = '' if target_labels is None else \
                                     'phone.' if target_labels["phone_class"] == 1 else \
-                                    'cigarette. cigar. vape.' if target_labels["food_class"] == 1 else \
+                                    'cigarette. cigar. electronic cigarette.' if target_labels["cigarette_class"] == 1 else \
                                     'food. drink. coffee. doughnut. energy drink. sandwich. soda. can. bottle. chips. granola bar. muffin. snack. candy. bagel. biscuit. pizza. fruit. icecream. juice box. pastry. chips. smoothie.' if target_labels["food_class"] == 1 else ''
                     obj_mask = torch.zeros((image_pil.height, image_pil.width), dtype=torch.bool)
                     obj = torch.ones((image_pil.height, image_pil.width, 3))
@@ -324,7 +324,7 @@ def create_prompt_llava(args: argparse.Namespace):
 
     pred = Predictor()
     pred.setup()
-    query = "follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
+    query = "Follow this example of caption 'a man sitting in the driver's seat of a car' and provide a COMPACT and OBJECTIVE caption for the action currently performed by the driver if DISTRACTED, using OBJECTS or ATTENTIVE to the street"
     query = 'Provide as output ONLY THE BESTS label for the image choosing the list one of the following: "phone", "driver distracted", "driver drowsy", "driver attentive", "food or drink", "cigarette". "cigarette"=person interacting with a cigarette. "food or drink"=person interacting with foods or drinks. "phone"=person interacting with a phone. "driver attentive"=person focused watching forward with open eyes. "driver drowsy"= person with eyes closed or yawning (if drowsy not attentive or distracted). "driver distracted"=person not watching forward, or engaged in other activities, such as using a phone, eating, or smoking (if distracted not attentive or drowsy)'
 
     csv_file = args.get("csv", None)
