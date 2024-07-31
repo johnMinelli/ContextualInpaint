@@ -279,21 +279,23 @@ def run_object_detection(args: argparse.Namespace):
                     # NOTE: not considering mask overlap but obj distance to person mask
                     assert image_pil.height==mask_pil.height and image_pil.width==mask_pil.width, "Image and mask must be the same size"
                     # make detection
-                    text_prompt = '' if target_labels is None else \
-                                    'phone.' if target_labels["phone_class"] == 1 else \
-                                    'cigarette. cigar. electronic cigarette.' if target_labels["cigarette_class"] == 1 else \
-                                    'food. drink. coffee. doughnut. energy drink. sandwich. soda. can. bottle. chips. granola bar. muffin. snack. candy. bagel. biscuit. pizza. fruit. icecream. juice box. pastry. chips. smoothie.' if target_labels["food_class"] == 1 else ''
+                    text_prompts = [''] if target_labels is None else \
+                                    ['phone.'] if target_labels["phone_class"] == 1 else \
+                                    ['cigarette. cigar. electronic cigarette.'] if target_labels["cigarette_class"] == 1 else \
+                                    ['food. doughnut. sandwich. chips. granola bar. muffin. snack. candy. bagel. biscuit. pizza. fruit. icecream. pastry. chips.', 'drink. coffee. energy drink. soda. can. bottle. juice box. smoothie.'] if target_labels["food_class"] == 1 else ['']
+
                     obj_mask = torch.zeros((image_pil.height, image_pil.width), dtype=torch.bool)
                     obj = torch.ones((image_pil.height, image_pil.width, 3))
-                    if text_prompt != '':
-                        masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.", box_threshold=0.25, text_threshold=0.25)
-                        idx_objects = [any([ll in list(filter(lambda x: x != "" and x != ", ", (text_prompt+" ").split(". "))) for ll in l.split()]) for i, l in enumerate(phrases)]
-                        hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
-                        if any(idx_objects) and len(hands) != 0:
-                            objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1
-                            segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
-                            obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
-                            obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
+                    for text_prompt in text_prompts:
+                        if text_prompt != '':
+                            masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.", box_threshold=0.25, text_threshold=0.25)
+                            idx_objects = [any([ll in list(filter(lambda x: x != "" and x != ", ", (text_prompt+" ").split(". "))) for ll in l.split()]) for i, l in enumerate(phrases)]
+                            hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
+                            if any(idx_objects) and len(hands) != 0:
+                                objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1
+                                segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
+                                obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
+                                obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
                     # save detection
                     obj_mask_file = mask_file.replace("mask", "obj_mask")
                     plt.imsave(obj_mask_file, obj_mask.cpu().numpy())
