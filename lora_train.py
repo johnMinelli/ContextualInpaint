@@ -510,7 +510,7 @@ class Trainer():
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     # Object loss enhance
                     if batch.get("obj_mask", None) is not None:
-                        obj_mask = torch.nn.functional.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
+                        obj_mask = F.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
                         obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
                         loss += loss*obj_mask*0.1
 

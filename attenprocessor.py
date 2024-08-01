@@ -1,4 +1,7 @@
 ﻿from typing import List
+
+import cv2
+import numpy as np
 from diffusers.models.attention_processor import AttnProcessor, Attention
 
 import torch
@@ -108,7 +111,7 @@ class AttentionStore():
         # average over heads
         out = out.sum(1) / out.shape[1]
         return out
-    
+
     def get_cross_attention_mask(self, block_positions, res, stored_attention_index, token_positions, attention_mask_threshold):
         out = self.aggregate_attention(attention_maps=self.step_store, res=res, block_positions=block_positions, is_cross=True, select=stored_attention_index)
         # average over all tokens (do it batch-wise) # 0 -> startoftext
@@ -120,7 +123,7 @@ class AttentionStore():
         tmp = torch.quantile(smooth_attn_map.flatten(start_dim=1).to(torch.float32), attention_mask_threshold, dim=1).to(smooth_attn_map.dtype)
         # attn_mask = torch.where(attn_map >= tmp.unsqueeze(1).unsqueeze(1).repeat(1, *attn_map.shape[-2:]), 1.0,0.0).unsqueeze(1)
         attn_mask = torch.round(torch.sigmoid(10.0 * (smooth_attn_map - tmp.unsqueeze(1).unsqueeze(1).repeat(1, *smooth_attn_map.shape[-2:]))))
-        
+
         return attn_mask, attn_map
 
 
@@ -166,7 +169,7 @@ class CrossAttnProcessor:
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         self.attn_store(attention_probs, is_cross=True, place_in_unet=self.place_in_unet, num_heads=attn.heads)
         hidden_states = torch.bmm(attention_probs, value)
-        
+
         hidden_states = attn.batch_to_head_dim(hidden_states)
 
         # linear proj

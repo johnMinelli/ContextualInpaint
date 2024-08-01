@@ -30,11 +30,12 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers.loaders import LoraLoaderMixin
+from diffusers.models.attention_processor import AttnProcessor
 from lycoris import LycorisNetwork, create_lycoris
 from peft import LoraConfig, set_peft_model_state_dict
 from safetensors.torch import load_file
 
-from attenprocessor import AttentionStore
+from attenprocessor import AttentionStore, CrossAttnProcessor
 from dataset import DiffuserDataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
@@ -57,11 +58,14 @@ from utils.utils import import_text_encoder_from_model_name_or_path, replicate, 
 
 if is_wandb_available():
     import wandb
-    # wandb.init(project="train_controlnet", resume="9a4jqxny")
+    # wandb.init(project="train_controlnet", resume="nss7gkx3")
 
 
 logger = get_logger(__name__)
 TRAIN_OBJ_MASKING = False
+HAND_ATTN_INPAINT = False
+MASK_CTRL_OUT = False
+LOSS_IN_SAM = False
 
 def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
@@ -76,7 +80,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         text_encoder=text_encoder,
         controlnet_text_encoder=controlnet_text_encoder,
         controlnet_image_encoder=controlnet_image_encoder,
-        controlnet_prompt_seq_projection=TRAIN_OBJ_MASKING,
+        controlnet_prompt_seq_projection=True if args.train_obj_ctrl is not None else TRAIN_OBJ_MASKING,
         tokenizer=tokenizer,
         unet=unet_clone,
         controlnet=controlnet,
@@ -165,8 +169,13 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
 class Trainer():
     def __init__(self, args):
         self.args = args
+        device = torch.device("cuda")
         logging_dir = Path(args.output_dir, args.logging_dir)
         self.safety_checker = None
+        self.TRAIN_OBJ_MASKING = True if self.args.train_obj_ctrl is not None else TRAIN_OBJ_MASKING
+        self.HAND_ATTN_INPAINT = True if self.args.inpaint_only_hand_area is not None else HAND_ATTN_INPAINT
+        self.MASK_CTRL_OUT = True if self.args.mask_out_inpainted_area is not None else MASK_CTRL_OUT
+        self.LOSS_IN_SAM = True if self.args.sam_area_loss is not None else LOSS_IN_SAM
 
         # Load the accelerator
         accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -209,7 +218,7 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, dilated_conditioning_mask=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
+        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=False, dilated_conditioning_mask=True) for data_dir in args.train_data_dir]
         self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class
@@ -237,10 +246,10 @@ class Trainer():
                 # unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
                 # b = set_peft_model_state_dict(self.unet, unet_state_dict, adapter_name="default")
                 self.unet.cuda()
-                LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
+                LycorisNetwork.apply_preset({"target_module": ["Attention"], })
                 lyco = create_lycoris(self.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
                 lyco.apply_to()
-                lyco_state = torch.load(os.path.join(args.lora, "lycorice.ckpt"), map_location=torch.device("cuda"))
+                lyco_state = torch.load(os.path.join(args.lora, "lycorice.ckpt"), map_location=device)
                 lyco.load_state_dict(lyco_state)
                 lyco.restore()
                 lyco = lyco.cuda()
@@ -276,7 +285,7 @@ class Trainer():
                         # load diffusers style into model
                         # load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
                         # model.register_to_config(**load_model.config)
-    
+
                         model.load_state_dict(load_file(os.path.join(input_dir,"controlnet/diffusion_pytorch_model.safetensors")))
                         # del load_model
 
@@ -291,8 +300,6 @@ class Trainer():
                     from accelerate import cpu_offload_with_hook
                 else:
                     raise ImportError("`enable_model_cpu_offload` requires `accelerate v0.17.0` or higher.")
-
-                device = torch.device("cuda")
 
                 hook = None
                 for cpu_offloaded_model in [self.vae, self.text_encoder, self.controlnet_text_encoder]:
@@ -318,6 +325,11 @@ class Trainer():
         self.controlnet_image_encoder.requires_grad_(False)
         self.controlnet_text_encoder.requires_grad_(False)
         self.controlnet.train()
+
+        if self.HAND_ATTN_INPAINT:
+            self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=args.train_batch_size, classifier_free_guidance=False, device=device)
+            self.mod_unet()
+            self.unet.mod = True
 
         # Settings for optimization
         if args.enable_xformers_memory_efficient_attention:
@@ -398,7 +410,7 @@ class Trainer():
             num_cycles=args.lr_num_cycles,
             power=args.lr_power,
         )
-        
+
         # For mixed precision training we cast the text_encoder and vae weights to half-precision
         # as these models are only used for inference, keeping weights in full precision is not required.
         self.weight_dtype = torch.float32
@@ -473,6 +485,31 @@ class Trainer():
                 self.initial_global_step = self.global_step
                 self.first_epoch = self.global_step // num_update_steps_per_epoch
 
+    def mod_unet(self):
+        assert self.attention_store is not None, "AttentionStore must be initialized first."
+        attn_procs = {}
+        for name in self.unet.attn_processors.keys():
+            if name.startswith("mid_block"):
+                place_in_unet = "mid"
+            elif name.startswith("up_blocks"):
+                place_in_unet = "up"
+            elif name.startswith("down_blocks"):
+                place_in_unet = "down"
+            else:
+                continue
+
+            # Replace attention module
+            if "attn2" in name:
+                attn_procs[name] = CrossAttnProcessor(
+                    attention_store=self.attention_store,
+                    place_in_unet=place_in_unet
+                )
+            else:
+                attn_procs[name] = AttnProcessor()
+
+        self.unet.set_attn_processor(attn_procs)
+
+
     def train(self):
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {self.num_samples}")
@@ -532,19 +569,20 @@ class Trainer():
                     conditioning_image = self.pipe_utils.prepare_conditioning_image(conditioning_image, 1, self.accelerator.device, self.weight_dtype, do_classifier_free_guidance=False)
 
                     # Prompt to embeddings
-                    assert (not TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]=="") or (TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]!=""), "ERR: TRAIN_OBJ_MASKING is False/True but `ctrl_txt_image` is/is not provided."
+                    # assert (not self.TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]=="") or (self.TRAIN_OBJ_MASKING and batch["ctrl_txt_image"][0]!=""), "ERR: TRAIN_OBJ_MASKING is False/True but `ctrl_txt_image` is/is not provided."
 
-                    flag_image_as_hid_prompt = (np.random.random() > 0.5) if TRAIN_OBJ_MASKING else False
+                    flag_image_as_hid_prompt = False  # (np.random.random() > 0.5) if self.TRAIN_OBJ_MASKING else False
 
-                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
+                    encoder_hidden_states, encoder_ids, _ = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tokenizer_output=True, return_tuple=False)
                     encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
                     encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
 
-                    if TRAIN_OBJ_MASKING:
-                        # apply projection layer to all sequence tokens to match size between the two encoders
-                        encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
-                            if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
+                    # if self.TRAIN_OBJ_MASKING:
+                    #     # apply projection layer to all sequence tokens to match size between the two encoders
+                    #     encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
+                    #         if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
 
+                    self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         noisy_latents_model_input, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states_ctrl,
@@ -557,18 +595,47 @@ class Trainer():
                         torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
-                        if TRAIN_OBJ_MASKING:
+                        if self.MASK_CTRL_OUT:  # TODO this has to be re-evaluated as we are going to train on their data
                             mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
                             down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
-                        noisy_latents_model_input = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
+                        noisy_latents_model_input_unet = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
 
                     # Predict the noise residual
                     noise_pred = self.unet(
-                        noisy_latents_model_input, timesteps_model_input,
+                        noisy_latents_model_input_unet, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states,
-                        down_block_additional_residuals=[sample.to(dtype=self.weight_dtype) for sample in down_block_res_samples],
-                        mid_block_additional_residual=mid_block_res_sample.to(dtype=self.weight_dtype),
+                        down_block_additional_residuals=[sample.to(dtype=self.weight_dtype) for sample in down_block_res_samples] if not self.HAND_ATTN_INPAINT else None,
+                        mid_block_additional_residual=mid_block_res_sample.to(dtype=self.weight_dtype) if not self.HAND_ATTN_INPAINT else None,
                     ).sample
+
+                    if self.HAND_ATTN_INPAINT:
+                        # First cycle only to store the unet attention, then the one using it
+                        tokens_position = torch.cat([torch.stack([torch.tensor([p_ == 2463 for p_ in p[0]])]) for p in encoder_ids.chunk(bs)])
+                        attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 16, 0, tokens_position, 0.965)
+                        self.attention_store.step(False)
+
+                        conditioning_image = torch.logical_and(F.interpolate(attn_mask.unsqueeze(1).to(torch.float32), image.shape[-2:]).expand(*image.shape), conditioning_image > 0.5).to(torch.float32)
+                        down_block_res_samples, mid_block_res_sample = self.controlnet(
+                            noisy_latents_model_input,
+                            timesteps_model_input,
+                            encoder_hidden_states=encoder_hidden_states_ctrl,
+                            controlnet_cond=conditioning_image,
+                            class_labels=batch["class"].squeeze() if self.args.use_classemb else None,
+                            return_dict=False,
+                        )
+                        if mask is not None and self.unet.config.in_channels == 9:
+                            if self.MASK_CTRL_OUT:  # TODO again this should be re-evaluated
+                                mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
+                                down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
+                            noisy_latents_model_input_unet = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
+                        noise_pred = self.unet(
+                            noisy_latents_model_input_unet,
+                            timesteps_model_input,
+                            encoder_hidden_states=encoder_hidden_states,
+                            mid_block_additional_residual=mid_block_res_sample.to(dtype=self.weight_dtype),
+                            down_block_additional_residuals=[sample.to(dtype=self.weight_dtype) for sample in down_block_res_samples],
+                        ).sample
+                        self.attention_store.step(False)
 
                     # Get the target for loss depending on the prediction type
                     if self.noise_scheduler.config.prediction_type == "epsilon":
@@ -577,8 +644,14 @@ class Trainer():
                         target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
                     else:
                         raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                    # Object loss enhance
+                    if self.LOSS_IN_SAM and batch.get("obj_mask", None) is not None:
+                        obj_mask = F.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
+                        obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
+                        loss = loss*obj_mask
 
+                    loss = loss.mean()
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
                         params_to_clip = self.controlnet.parameters()

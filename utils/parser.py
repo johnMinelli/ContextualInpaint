@@ -70,7 +70,11 @@ class Train_args:
         self.parser.add_argument("--rank", type=int, default=4, help="The dimension of the LoRA update matrices.")
         self.parser.add_argument("--alpha_rank", type=int, default=4, help="The weight scaling LoRA update matrices.")
         self.parser.add_argument("--lycorice_algo", type=str, default="full", help="The algorithm used for LyCORICE library.")
-        self.parser.add_argument("--dist_match", type=float, default=0.05, help="If add distribution match loss, and what's the weight")
+        self.parser.add_argument("--train_obj_ctrl", action="store_true", help="Whether the expected behavious is training the first(person) or second(obj) ControlNet.")
+        self.parser.add_argument("--inpaint_only_hand_area", action="store_true", help="Whether or not to restrict the ControlNet inpaint area to the overlap between the agiven Conditioning area and the binarized attention mask relative to 'hand' token.")
+        self.parser.add_argument("--mask_out_inpainted_area", action="store_true", help="Whether or not mask the ControlNet output just to the inpainted area.")
+        self.parser.add_argument("--sam_area_loss", action="store_true", help="Whether or not mask the gradients used to compute the loss only to the SAM detected area.")
+
     def parse_args(self, input_args=None):
         if input_args is not None:
             args = self.parser.parse_args(input_args)
