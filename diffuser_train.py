@@ -646,7 +646,7 @@ class Trainer():
                         raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     # Object loss enhance
-                    if self.LOSS_IN_SAM and batch.get("obj_mask", None) is not None:
+                    if self.LOSS_IN_SAM and batch.get("obj_mask", None) is not None and batch.get("obj_mask", None).any():
                         obj_mask = F.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
                         obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
                         loss = loss*obj_mask
