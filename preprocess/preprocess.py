@@ -224,7 +224,7 @@ def run_object_detection(args: argparse.Namespace):
         hand_centers_y = (hand_boxes[:, 1] + hand_boxes[:, 3]) / 2
         hand_sizes_x = hand_boxes[:, 2] - hand_boxes[:, 0]
         hand_sizes_y = hand_boxes[:, 3] - hand_boxes[:, 1]
-        max_distances = (torch.max(hand_sizes_x, hand_sizes_y) / 2) * 2
+        max_distances = (torch.max(hand_sizes_x, hand_sizes_y) / 2) * 2.5
 
         obj_centers_x = (obj_boxes[:, 0] + obj_boxes[:, 2]) / 2
         obj_centers_y = (obj_boxes[:, 1] + obj_boxes[:, 3]) / 2
@@ -261,7 +261,6 @@ def run_object_detection(args: argparse.Namespace):
     with torch.no_grad():
         if os.path.exists(os.path.join(root, "prompt.json")):
             updated_lines = []
-            objects_identified = {}
             # read lines
             with open(os.path.join(root, "prompt.json"), 'r') as file:
                 lines = file.readlines()
@@ -289,21 +288,23 @@ def run_object_detection(args: argparse.Namespace):
                     for text_prompt in text_prompts:
                         if text_prompt != '':
                             masks, boxes, phrases, logits = model.predict(image_pil, text_prompt+" hand.", box_threshold=0.25, text_threshold=0.25)
-                            idx_objects = [any([ll in list(filter(lambda x: x != "" and x != ", ", (text_prompt+" ").split(". "))) for ll in l.split()]) for i, l in enumerate(phrases)]
-                            hands = [boxes[i] for i, l in enumerate(phrases) if l in ["hand"]]
-                            if any(idx_objects) and len(hands) != 0:
-                                objects_identified[text_prompt] = objects_identified.get(text_prompt, 0)+1
-                                segmented_objects = masks[idx_objects][check_overlap(torch.stack(hands), boxes[idx_objects])]
+                            texts_objects = [[ll for ll in l.split() if ll in list(filter(lambda x: x != "" and x != ", ", (text_prompt+" ").split(". ")))] for i, l in enumerate(phrases)]
+                            idx_objects = [len(texts)>0 for texts in texts_objects]
+                            idx_hands = [l in ["hand"] for l in phrases]
+                            if any(idx_objects) and len(idx_hands):
+                                obj_text = " ".join(set([t for texts, flag in zip(texts_objects, idx_objects) for t in texts if flag]))
+                                segmented_objects = masks[idx_objects][check_overlap(boxes[idx_hands], boxes[idx_objects])]
                                 obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
                                 obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
                     # save detection
-                    obj_mask_file = mask_file.replace("mask", "obj_mask")
-                    plt.imsave(obj_mask_file, obj_mask.cpu().numpy())
-                    subfolder = '' if target_labels is None else '/phone' if target_labels["phone_class"] == 1 else '/cigarette' if target_labels["cigarette_class"] == 1 else '/food' if target_labels["food_class"] == 1 else ''
-                    plt.imsave(mask_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
-                    json_data["obj_mask"] = obj_mask_file.replace(root, "")
-                    updated_lines.append(json_data)
-        print(objects_identified)
+                    if obj_mask.any():
+                        obj_mask_file = mask_file.replace("mask", "obj_mask")
+                        plt.imsave(obj_mask_file, obj_mask.cpu().numpy())
+                        subfolder = '' if target_labels is None else '/phone' if target_labels["phone_class"] == 1 else '/cigarette' if target_labels["cigarette_class"] == 1 else '/food' if target_labels["food_class"] == 1 else ''
+                        plt.imsave(mask_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
+                        json_data["obj_mask"] = obj_mask_file.replace(root, "")
+                        json_data["obj_text"] = obj_text
+                        updated_lines.append(json_data)
         # overwrite the json
         with open(os.path.join(root, "prompt.json"), 'w') as outfile:
             for line in updated_lines:
