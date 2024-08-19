@@ -582,7 +582,7 @@ class Trainer():
                     #     encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
                     #         if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
 
-                    self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
+                    encoder_hidden_states_ctrl = self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         noisy_latents_model_input, timesteps_model_input,
                         encoder_hidden_states=encoder_hidden_states_ctrl,

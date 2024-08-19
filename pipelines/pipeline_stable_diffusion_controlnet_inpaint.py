@@ -31,7 +31,7 @@ from diffusers.pipelines.stable_diffusion.pipeline_output import StableDiffusion
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 
-from utils.utils import split_multi_net
+from utils.utils import multi_controlnet_helper, compute_centroid, select_random_point_on_border
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -128,7 +128,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             Apply the projection layer to the whole sequence of the output of the CLIP encoder (the last hidden layer).
             The projection layer is usually applied during CLIP training to the last token of the sequence to match
             text and video and train the network. We employ such projection layer to match the hidden size of text
-            and image encodings to pass to the unet cross attention blocks.  
+            and image encodings to pass to the unet cross attention blocks.
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
             Please refer to the [model card](https://huggingface.co/runwayml/stable-diffusion-v1-5) for more details
@@ -824,10 +824,13 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         width: Optional[int] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
+        cg_step: Optional[int] = None,
+        cg_values: Optional[List[float]] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        class_conditional: Optional[torch.Tensor] = None,
         noisy_latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -835,11 +838,13 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_conditioning_scale: Union[float, List[float]] = 0.8,
+        self_guidance_scale: Union[float, List[float]] = 0.0,
         guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
-        focus_prompt: Optional[List[str]] = None,
-        focus_prompt_embeds = None,
+        focus=None,
+        aux_focus_prompt: Optional[List[str]] = None,
+        aux_focus_prompt_embeds = None,
         gradient_checkpointing: bool = False,
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
@@ -935,8 +940,9 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 The percentage of total steps at which the ControlNet starts applying.
             control_guidance_end (`float` or `List[float]`, *optional*, defaults to 1.0):
                 The percentage of total steps at which the ControlNet stops applying.
-            focus_prompt: (List(str), *optional*): The additional prompt to cllect attention inside the unet.
-            focus_prompt_embeds (List(str), *optional*): Pre-generated text embeddings for the focus prompt. If not
+            focus: Pre-generated text embeddings to search in `prompt` input argument.
+            aux_focus_prompt: (List(str), *optional*): The additional prompt to cllect attention inside the unet.
+            aux_focus_prompt_embeds (List(str), *optional*): Pre-generated text embeddings for the focus prompt. If not
                 provided, text embeddings are generated from the `focus_prompt` input argument.
             clip_skip (`int`, *optional*):
                 Number of layers to be skipped from CLIP while computing the prompt embeddings. A value of 1 means that
@@ -977,7 +983,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
-            prompt, controlnet_prompt, focus_prompt, conditioning_image, height, width, mask_image, negative_prompt, prompt_embeds, negative_prompt_embeds, focus_prompt_embeds, controlnet_conditioning_scale, control_guidance_start, control_guidance_end, callback_on_step_end_tensor_inputs, generator
+            prompt, controlnet_prompt, aux_focus_prompt, conditioning_image, height, width, mask_image, negative_prompt, prompt_embeds, negative_prompt_embeds, aux_focus_prompt_embeds, controlnet_conditioning_scale, control_guidance_start, control_guidance_end, callback_on_step_end_tensor_inputs, generator
         )
 
         # 2. Define call parameters
@@ -997,6 +1003,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         do_classifier_free_guidance = guidance_scale > 1 and self.unet.config.time_cond_proj_dim is None
         self._clip_skip = clip_skip
         self._cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
+        cg_image = None
 
         if isinstance(controlnet, MultiControlNetModel) and isinstance(controlnet_conditioning_scale, float):
             controlnet_conditioning_scale = [controlnet_conditioning_scale] * len(controlnet.nets)
@@ -1008,32 +1015,38 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         ) 
         guess_mode = guess_mode or global_pool_conditions
 
-        if focus_prompt:
+        if aux_focus_prompt:
             enable_prompt_focus = True
             if batch_size == 1:
-                if isinstance(focus_prompt, str):
+                if isinstance(aux_focus_prompt, str):
                     self.num_focus_prompts = 1
-                    focus_prompt = [focus_prompt]
-                elif isinstance(focus_prompt, list):
-                    self.num_focus_prompts = len(focus_prompt)
+                    aux_focus_prompt = [aux_focus_prompt]
+                elif isinstance(aux_focus_prompt, list):
+                    self.num_focus_prompts = len(aux_focus_prompt)
             else:
-                self.num_focus_prompts = 1 if isinstance(focus_prompt[0], str) else len(focus_prompt[0])
-        elif focus_prompt_embeds is not None:
+                self.num_focus_prompts = 1 if isinstance(aux_focus_prompt[0], str) else len(aux_focus_prompt[0])
+        elif aux_focus_prompt_embeds is not None:
             enable_prompt_focus = True
-            self.num_focus_prompts = focus_prompt_embeds.shape[0]
-            if len(focus_prompt) == 0: focus_prompt = ["<unspecified>"]*self.num_focus_prompts  # patch
+            self.num_focus_prompts = aux_focus_prompt_embeds.shape[0]
+            if len(aux_focus_prompt) == 0: focus_prompt = ["<unspecified>"]*self.num_focus_prompts  # patch
+        elif focus is not None:
+            enable_prompt_focus = True
+            self.num_focus_prompts = 0
         else:
             enable_prompt_focus = False
             self.num_focus_prompts = 0
 
-        if enable_prompt_focus:
+        # Focus and self guidance require memorization of unet attention maps during execution
+        if enable_prompt_focus or self_guidance_scale > 0:
             # initialize mask smoother, attention store and mod the unet
-            self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance, device=device)
             self.attn_cum_map = torch.tensor([], device=device)
             self.attn_cum_filter = torch.tensor([], device=device)
             self.attn_filter = None
             self.attn_mask = None
-            self.mod_unet()
+            if self.attention_store is None or not self.unet.mod:
+                self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance, device=device)
+                self.mod_unet()
+                self.unet.mod = True
 
         # 3. Encode input prompt
         text_encoder_lora_scale = self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
@@ -1081,24 +1094,24 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 else:
                     logger.warning("`controlnet_prompt_seq_projection` is True but no text_encoder with projection is given.")
 
-        if enable_prompt_focus:
+        if enable_prompt_focus and self.num_focus_prompts > 0:
             # flatten batched lists of focus prompts
             if batch_size > 1 and self.num_focus_prompts > 1:
-                focus_prompt = [p for batch in focus_prompt for p in batch]
+                aux_focus_prompt = [p for batch in aux_focus_prompt for p in batch]
             focus_prompt_embeds, focus_prompt_ids, focus_prompt_lengths = self.encode_prompt(
-                focus_prompt,
+                aux_focus_prompt,
                 device,
                 False,
                 self.text_encoder,
                 num_images_per_prompt=num_images_per_prompt,
-                prompt_embeds=focus_prompt_embeds,
+                prompt_embeds=aux_focus_prompt_embeds,
                 return_tokenizer_output=True,
                 return_tuple=False
             )  # (1*b*fp*n,seq,hid)
             # list of prompts in one batch for which the cross attention is stored by the AttentionStore (debug helper)
-            prompts_per_batch = ([prompt] if isinstance(prompt, str) else [prompt[0]] if isinstance(prompt, list) else [None]) + ([focus_prompt] if isinstance(focus_prompt, str) else focus_prompt[:self.num_focus_prompts])
+            prompts_per_batch = ([prompt] if isinstance(prompt, str) else [prompt[0]] if isinstance(prompt, list) else [None]) + ([aux_focus_prompt] if isinstance(aux_focus_prompt, str) else aux_focus_prompt[:self.num_focus_prompts])
             # embeds to feed the unet
-            prompt_embeds = torch.cat([prompt_embeds, focus_prompt_embeds], 0)  # ([(cfg*b*1*n)+(1*b*fp*n)],seq,hid) 
+            prompt_embeds = torch.cat([prompt_embeds, focus_prompt_embeds], 0)  # ([(cfg*b*1*n)+(1*b*fp*n)],seq,hid)
 
         # 4. Prepare image
         if controlnet is not None:
@@ -1106,7 +1119,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             nets = len(self.controlnet.nets) if isinstance(self.controlnet, MultiControlNetModel) else 1
             if batch_size > 1 or nets > 1:
                 if isinstance(conditioning_image, torch.Tensor):
-                    conditioning_image = [el for el in conditioning_image]  # either you end up with chw, bchw or nchw is fine for the preprocessor  
+                    conditioning_image = [el for el in conditioning_image]  # either you end up with chw, bchw or nchw is fine for the preprocessor
                 elif isinstance(conditioning_image, list) and isinstance(conditioning_image[0], list):
                     conditioning_image = [image for batch in conditioning_image for image in batch]
             conditioning_image = self.conditioning_image_processor.preprocess(conditioning_image, height=height, width=width)
@@ -1130,7 +1143,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             if mask_image is not None:
                 # Prepare mask latent
                 init_mask = self.mask_processor.preprocess(mask_image, height=height, width=width).to(device)
-                # repeat for the batch if needed 
+                # repeat for the batch if needed
                 init_mask = init_mask.repeat(batch_size // init_mask.shape[0], 1, 1, 1)  # (b,c,h,w)
                 masked_image = init_image.clone()
                 masked_image[init_mask.expand(init_image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
@@ -1203,19 +1216,27 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         is_unet_compiled = is_compiled_module(self.unet)
         is_controlnet_compiled = is_compiled_module(self.controlnet)
         is_torch_higher_equal_2_1 = is_torch_version(">=", "2.1")
-
-        attn_th, res, block_positions, filter_th = 0.92, 16, ["up"], 0.00
+        centroid_target = {}
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Relevant thread: https://dev-discuss.pytorch.org/t/cudagraphs-in-pytorch-2-0/1428
                 if (is_unet_compiled and is_controlnet_compiled) and is_torch_higher_equal_2_1:
                     torch._inductor.cudagraph_mark_step_begin()
+                if self_guidance_scale > 0:
+                    noisy_latents = noisy_latents.detach().clone()
+                    noisy_latents.requires_grad = True
+                if cg_step is not None and i >= cg_step:  # cg effect is enabled
+                    if cg_values is None or len(cg_values) == 0:  # there are no values already computed
+                        if cg_image is None:  # this is the first step of the guidance sequence
+                            cg_image = noisy_latents.detach().clone()  # start graph from this step
+                            cg_image.requires_grad = True
+                            noisy_latents = cg_image
 
-                # expand the latents if we are doing classifier free guidance or if there are focus prompts [neg][pos][focus]
+                # expand the latents if we are doing classifier free guidance or in case of `focus prompts` [neg][pos][focus]
                 latent_model_input = torch.cat([noisy_latents] * (1+int(do_classifier_free_guidance)+self.num_focus_prompts))  # ((fp+cfg)*b*n,c_vae,h_vae,w_vae)
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # NOTE: for inpainting, in the masked area of the rgb image use the latent filling option you prefer:
+                # NOTE, doing inpainting, there are different options to fill masked area of the rgb image:
                 #   fill: default
                 #   original: latent_model_input[mask.expand(latent_model_input.shape) > 0.5] = torch.mean(latent_model_input[mask.expand(latent_model_input.shape) > 0.5])
                 #   latent nothing: latent_model_input[mask.expand(latent_model_input.shape) > 0.5] = torch.randn_like(latent_model_input)[mask.expand(latent_model_input.shape) > 0.5]
@@ -1223,32 +1244,29 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
                 # controlnet(s) call
                 if controlnet is not None:
-                    control_model_input = torch.cat([noisy_latents] * (1+int(do_classifier_free_guidance and not guess_mode)))
-                    control_model_input = self.scheduler.scale_model_input(control_model_input, t)
-                    control_attention_mask = torch.cat([self.attn_mask] * (1+int(do_classifier_free_guidance and not guess_mode))) if self.attn_mask is not None else None  # (cfg*b*n,1,h_block,w_block)
+                    controlnet_model_input = torch.cat([noisy_latents] * (1+int(do_classifier_free_guidance and not guess_mode)))
+                    controlnet_model_input = self.scheduler.scale_model_input(controlnet_model_input, t)
+                    controlnet_focus_mask = torch.cat([self.attn_mask] * (1+int(do_classifier_free_guidance and not guess_mode))) if self.attn_mask is not None else None  # (cfg*b*n,1,h_block,w_block)
 
                     if isinstance(controlnet_keep[i], list):
-                        cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+                        controlnet_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
                     else:
                         controlnet_cond_scale = controlnet_conditioning_scale
                         if isinstance(controlnet_cond_scale, list):
                             controlnet_cond_scale = controlnet_cond_scale[0]
-                        cond_scale = controlnet_cond_scale * controlnet_keep[i]
+                        controlnet_scale = controlnet_cond_scale * controlnet_keep[i]
 
-                    down_block_res_samples, mid_block_res_sample = split_multi_net(
-                        self.controlnet, control_attention_mask,
-                        controlnet_prompt_embeds, conditioning_image, cond_scale, guess_mode, batch_size*num_images_per_prompt,
-                        **dict(sample=control_model_input, timestep=t, return_dict=False)
+                    down_block_res_samples, mid_block_res_sample = multi_controlnet_helper(
+                        self.controlnet, controlnet_prompt_embeds, conditioning_image, controlnet_focus_mask, controlnet_scale, guess_mode, batch_size*num_images_per_prompt,
+                        sample=controlnet_model_input, timestep=t, class_labels=class_conditional, return_dict=False
                     )
 
                     if guess_mode and do_classifier_free_guidance:
-                        # Infered ControlNet only for the conditional batch.
-                        # To apply the output of ControlNet to both the unconditional and conditional batches,
-                        # add 0 to the unconditional batch to keep it unchanged.
+                        # ControlNet effect is limited to conditional batch. Add zeros to the unconditional size.
                         down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
                         mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
-                    # append at the end (b*n*fp,c_block,h_block,w_block)
+                    # Append zeros at the end for the `focus_prompts` (b*n*fp,c_block,h_block,w_block)
                     down_block_res_samples = [torch.cat([d]+self.num_focus_prompts*[torch.zeros_like(d[:batch_size*num_images_per_prompt])]) for d in down_block_res_samples]
                     mid_block_res_sample = torch.cat([mid_block_res_sample]+self.num_focus_prompts*[torch.zeros_like(mid_block_res_sample[:batch_size*num_images_per_prompt])])
                 else:
@@ -1262,10 +1280,10 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
                 if gradient_checkpointing:
                     noise_pred = checkpoint.checkpoint(self.unet,
-                    latent_model_input, t, prompt_embeds, None, timestep_cond, None, self.cross_attention_kwargs, None, 
+                    latent_model_input, t, prompt_embeds, None, timestep_cond, None, self.cross_attention_kwargs, None,
                            None if controlnet is None else [d.detach() for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
                            None if controlnet is None else mid_block_res_sample.detach() if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None, None, None, False,
-                    use_reentrant=False)[0]
+                           use_reentrant=False)[0]
                 else:
                     noise_pred = self.unet(
                         sample=latent_model_input,
@@ -1273,10 +1291,32 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         encoder_hidden_states=prompt_embeds,
                         timestep_cond=timestep_cond,
                         cross_attention_kwargs=self.cross_attention_kwargs,
-                        down_block_additional_residuals=None if controlnet is None else down_block_res_samples if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*) 
+                        down_block_additional_residuals=None if controlnet is None else [d for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*)
                         mid_block_additional_residual=None if controlnet is None else mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
                         return_dict=False,
                     )[0]
+
+                if self_guidance_scale > 0:
+                    target_loss, distance_loss, size_loss = torch.zeros(batch_size).to(device), torch.zeros(batch_size).to(device), torch.zeros(batch_size).to(device)
+                    for res in [16,32]:
+                        tokens_position_hand = torch.cat([torch.tensor([pt == 2463 for pt in p[0]] * num_images_per_prompt).view(num_images_per_prompt, -1) for p in prompt_ids.chunk(batch_size)])
+                        tokens_position_obj = torch.cat([torch.stack([torch.tensor([p_ in fp[torch.logical_and(torch.logical_and(fp > 0, fp < 49406), fp != 2463)] for p_ in p[0]])]*num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
+                        attn_mask_hand, attn_map_hand = self.attention_store.get_cross_attention_mask(["down", "up"], res, 0, tokens_position_hand, 0.98)
+                        attn_mask_obj, attn_map_obj = self.attention_store.get_cross_attention_mask(["down", "up"], res, 0, tokens_position_obj, 0.92)
+                        if attn_mask_obj.any():
+                            if centroid_target.get(res, None) is None:
+                               centroid_target[res] = select_random_point_on_border(torch.cat([torch.stack([im[-1][0]] * num_images_per_prompt) for im in conditioning_image.chunk(batch_size)])) * res / 512
+                            target = centroid_target[res]
+                            centroid_obj = compute_centroid(attn_map_obj * attn_mask_obj)
+                            centroid_hand = compute_centroid(attn_map_hand * attn_mask_hand).detach()
+                            target[centroid_hand.sum(-1) != 0] = centroid_hand[centroid_hand.sum(-1) != 0]  # complete the current target with hand area
+
+                            target_loss += 0  # F.l1_loss(attn_map_hand * attn_mask_hand, (attn_map_hand * attn_mask_hand * 1000).detach())
+                            distance_loss += (F.l1_loss(centroid_obj, target, reduction="none").mean(-1) / res) + (F.l1_loss(centroid_hand, target, reduction="none").mean(-1) / res)*(centroid_hand.sum(-1) == 0)
+                            size_loss += 0  # torch.sum(attn_mask_obj) - (0.01 * attn_mask_obj.numel())
+
+                            if (distance_loss+size_loss+target_loss).isnan().any():
+                                raise Exception("Error")
 
                 # split guidance and focus prompts
                 noise_pred = noise_pred.chunk(1 + int(do_classifier_free_guidance) + self.num_focus_prompts)
@@ -1286,6 +1326,12 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 else:
                     noise_pred, _ = noise_pred[0], noise_pred[1:]
 
+                if self_guidance_scale > 0:
+                    self_guidance_loss = (target_loss + distance_loss + size_loss).sum()
+                    noise_pred = noise_pred + (self_guidance_scale * torch.autograd.grad(self_guidance_loss, noisy_latents)[0])
+                elif cg_values is not None and len(cg_values) > 0 and cg_step is not None and i >= cg_step:
+                    cg_direction = cg_values.pop(0)
+                    noise_pred = noise_pred + cg_direction
                 # compute the previous noisy sample x_t -> x_t-1
                 denoised_latents = self.scheduler.step(noise_pred, t, noisy_latents, **extra_step_kwargs, return_dict=False)[0]
 
@@ -1301,14 +1347,15 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     denoised_latents = (1 - latents_inpaint_mask) * init_noisy_latents + latents_inpaint_mask * denoised_latents
 
                 if enable_prompt_focus:
-                    tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
-                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(block_positions, res, 0, tokens_position, attn_th)
-                    self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
-                    self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
-
+                    if self.num_focus_prompts > 0:  # use prompt ids
+                        tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
+                    else:  # use focus token
+                        tokens_position = torch.cat([torch.stack([torch.tensor([p_ == focus for p_ in p[0]])] * num_images_per_prompt) for p in prompt_ids.chunk(batch_size)])
+                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 16, 0, tokens_position, 0.98)
+                    # self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
+                    # self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
                     self.attn_mask = attn_mask.unsqueeze(1)  # store to be used in next step
-                    self.attn_cum_map = attn_mask if self.attn_cum_map.size(0) == 0 else torch.stack([self.attn_cum_map, attn_mask]).sum(0)  # (viz helper)
-                    # reset accumulated attention maps in the store
+                    self.attn_cum_map = attn_map if self.attn_cum_map.size(0) == 0 else torch.stack([self.attn_cum_map, attn_map]).sum(0)  # (viz helper)
                     self.attention_store.step(False)
 
                 # Cycle and callbacks
@@ -1346,7 +1393,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             # 8. Post-processing
             image = self._decode_vae_latents(latents)
             # (viz helper) uncomment to show the masked controlnet area dictated by the focus prompt 
-            # cross_mask = F.interpolate(self.atten_cum_map, image.shape[-2:]).expand_as(image)
+            # cross_mask = F.interpolate(self.attn_cum_map, image.shape[-2:]).expand_as(image)
             # cross_mask = (cross_mask/cross_mask.max())*2
             # image[:, 0] = image[:, 0] + cross_mask[:, 0]
             image = self.image_processor.postprocess(image, output_type="np")
@@ -1362,7 +1409,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             image = self.image_processor.postprocess(image, output_type="np")
 
             # 9. Run safety checker
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)        
+            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
 
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:

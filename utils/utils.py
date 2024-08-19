@@ -18,43 +18,45 @@ def replicate(x, n):
 def mask_block(binary_mask, x):
     return F.interpolate(binary_mask.float(), size=x.shape[-2:], mode='nearest').bool().expand_as(x) * x
 
-def split_multi_net(controlnet, attention_mask, encoder_hidden_states, controlnet_cond, conditioning_scale, guess_mode, batch_size, **args):
+def multi_controlnet_helper(controlnet, encoder_hidden_states, conditioning_image, focus_mask, conditioning_scale, guess_mode, batch_size, **args):
     down_block_res_samples, mid_block_res_sample = None, None
     if isinstance(controlnet, MultiControlNetModel):
-        controlnets = controlnet.nets
+        controlnet = controlnet.nets
         # split the first dim flattened [guess_mode*batch*prompts*num_images] to [prompts,guess_mode*batch*num_images]  
         _, seq, hid = encoder_hidden_states.shape
-        _, c, h, w = controlnet_cond.shape
+        _, c, h, w = conditioning_image.shape
         cfg_chunks = 2 - int(guess_mode)
-        encoder_hidden_states = torch.stack(torch.stack(encoder_hidden_states.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnets), seq,hid).permute(1,0,2,3)
-        controlnet_cond = torch.stack(torch.stack(controlnet_cond.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnets), c,h,w).permute(1,0,2,3,4)
+        encoder_hidden_states = torch.stack(torch.stack(encoder_hidden_states.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnet), seq,hid).permute(1,0,2,3)
+        conditioning_image = torch.stack(torch.stack(conditioning_image.chunk(cfg_chunks), 0).chunk(batch_size, 1), 1).view(batch_size*cfg_chunks, len(controlnet), c,h,w).permute(1,0,2,3,4)
     else:
-        controlnets = [controlnet]
-        conditioning_scale = [conditioning_scale]
+        controlnet = [controlnet]
         encoder_hidden_states = [encoder_hidden_states]
-        controlnet_cond = [controlnet_cond]
+        conditioning_image = [conditioning_image]
+        conditioning_scale = [conditioning_scale]
 
-    for i, (controlnet, enc_hid_state, image, scale) in enumerate(zip(controlnets, encoder_hidden_states, controlnet_cond, conditioning_scale)):
-        # Apply attention focused mask
-        if attention_mask is not None:
-            atten_mask = F.interpolate(attention_mask.to(torch.float32), image.shape[-2:]).expand(*image.shape)
-            if len(controlnets) == 1 or i>0:
-                image = torch.logical_and(atten_mask, image>0.5).to(torch.float32)
+    for i, (net, enc_hid_state, image, scale) in enumerate(zip(controlnet, encoder_hidden_states, conditioning_image, conditioning_scale)):
+
+        # Apply attention focused mask. It is possible that the conditioning image becomes all black
+        if focus_mask is not None:
+            _focus_mask = F.interpolate(focus_mask.to(torch.float32), image.shape[-2:]).expand(*image.shape)
+            image = torch.logical_and(_focus_mask, image>0.5).to(torch.float32)
+
         # Remove class conditioning if provided but not supported
         controlnet_args = args.copy()
-        if controlnet.class_embedding is None and controlnet_args.get("class_labels", None) is not None:
+        if net.class_embedding is None and controlnet_args.get("class_labels", None) is not None:
             del controlnet_args["class_labels"]
 
-        down_samples, mid_sample = controlnet(encoder_hidden_states=enc_hid_state,
-                                              controlnet_cond=image,
-                                              conditioning_scale=scale,
-                                              guess_mode=guess_mode, **controlnet_args)
-        # # Apply attention focused mask
-        # if attention_mask is not None and (len(controlnets) == 1 or i>0):
-        #     # match the size and apply mask
-        #     mid_sample = mask_block(attention_mask, mid_sample)
-        #     down_samples = [mask_block(attention_mask, block) for block in down_samples]
-            
+        down_samples, mid_sample = net(encoder_hidden_states=enc_hid_state,
+                                        controlnet_cond=image,
+                                        conditioning_scale=scale,
+                                        guess_mode=guess_mode, **controlnet_args)
+
+        # Apply attention focused mask
+        if focus_mask is not None:
+            # match the size and apply mask
+            mid_sample = mask_block(image[:,:1], mid_sample)
+            down_samples = [mask_block(image[:,:1], block) for block in down_samples]
+
         # Merge samples
         if i == 0:
             down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
