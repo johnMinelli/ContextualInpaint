@@ -613,7 +613,6 @@ class Trainer():
                         tokens_position = torch.cat([torch.stack([torch.tensor([p_ == 2463 for p_ in p[0]])]) for p in encoder_ids.chunk(bs)])
                         attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 16, 0, tokens_position, 0.965)
                         self.attention_store.step(False)
-                        torch.cuda.empty_cache()  # free memory to avoid overhead
 
                         conditioning_image = torch.logical_and(F.interpolate(attn_mask.unsqueeze(1).to(torch.float32), image.shape[-2:]).expand(*image.shape), conditioning_image > 0.5).to(torch.float32)
                         down_block_res_samples, mid_block_res_sample = self.controlnet(
