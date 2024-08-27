@@ -312,6 +312,65 @@ def run_object_detection(args: argparse.Namespace):
                 outfile.write('\n')
 
 
+def square_detection(args: argparse.Namespace):
+    from PIL import Image
+    import numpy as np
+
+
+    root = args.get("input_path", DATA_PATH)+"/"
+    os.makedirs(os.path.join(root, "obj_mask_box"), exist_ok=True)
+    os.makedirs(os.path.join(root, "source_box"), exist_ok=True)
+
+    # read lines
+    with open(os.path.join(root, "prompt.json"), 'r') as file:
+        lines = file.readlines()
+
+    updated_lines = []
+    for line in tqdm(lines):
+        json_data = json.loads(line)
+        # read mask
+        obj_mask_file = os.path.join(root, json_data["obj_mask"])
+        obj_mask_pil = Image.open(obj_mask_file).convert("L")
+        obj_mask_arr = np.array(obj_mask_pil)
+        # get the bounding box
+        rows, cols = np.where(obj_mask_arr > 0)
+        if len(rows) > 0 and len(cols) > 0:
+            min_row, max_row = min(rows), max(rows)
+            min_col, max_col = min(cols), max(cols)
+            box_width = max_col - min_col + 1
+            box_height = max_row - min_row + 1
+            # ensure the bounding box is at least 40x40 pixels
+            if box_width < 40:
+                min_col = max(min_col - (40 - box_width) // 2, 0)
+                max_col = min(max_col + (40 - box_width) // 2, obj_mask_arr.shape[1] - 1)
+            if box_height < 40:
+                min_row = max(min_row - (40 - box_height) // 2, 0)
+                max_row = min(max_row + (40 - box_height) // 2, obj_mask_arr.shape[0] - 1)
+
+            obj_mask_arr[min_row:max_row + 1, min_col:max_col + 1] = 255
+            obj_mask_box_path = os.path.join("obj_mask_box", os.path.basename(obj_mask_file))
+            Image.fromarray(obj_mask_arr).save(os.path.join(root, obj_mask_box_path))
+
+            # read target
+            target_file = os.path.join(root, json_data["target"])
+            target_pil = Image.open(target_file).convert("RGB")
+            target_arr = np.array(target_pil)
+            target_arr[min_row:max_row + 1, min_col:max_col + 1] = 0
+            source_box_path = os.path.join("source_box", os.path.basename(target_file))
+            Image.fromarray(target_arr).save(os.path.join(root, source_box_path))
+
+            # Update the item with the new paths
+            json_data['obj_mask'] = obj_mask_box_path
+            json_data['source'] = source_box_path
+            updated_lines.append(json_data)
+
+    # Write the json
+    with open(os.path.join(root, "prompt_2.json"), 'w') as outfile:
+        for line in updated_lines:
+            json.dump(line, outfile)
+            outfile.write('\n')
+
+
 def create_prompt_llava(args: argparse.Namespace):
     from llava_predictor import Predictor
 
@@ -407,7 +466,7 @@ def create_prompt_blip(args: argparse.Namespace):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument("--action", required=True, choices=['mask', 'pose', 'prompt', 'clean', 'obj_mask'], help="Choose which action to run on the data.")
+    ap.add_argument("--action", required=True, choices=['mask', 'pose', 'prompt', 'clean', 'obj_mask', 'obj_mask_square'], help="Choose which action to run on the data.")
     ap.add_argument("--input_path", help="Path with images to process")
     ap.add_argument("--output_path", help="Path where to save the processed output")
     ap.add_argument("--csv", help="Path where to find associations between images and labels")
@@ -423,3 +482,5 @@ if __name__ == '__main__':
         clean_preprocessed_data(args)
     if args.get("action") == "obj_mask":
         run_object_detection(args)
+    if args.get("action") == "obj_mask_square":
+        square_detection(args)
