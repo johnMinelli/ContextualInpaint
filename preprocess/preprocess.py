@@ -318,7 +318,7 @@ def square_detection(args: argparse.Namespace):
 
 
     root = args.get("input_path", DATA_PATH)+"/"
-    os.makedirs(os.path.join(root, "obj_mask_box"), exist_ok=True)
+    os.makedirs(os.path.join(root, "mask_box"), exist_ok=True)
     os.makedirs(os.path.join(root, "source_box"), exist_ok=True)
 
     # read lines
@@ -348,8 +348,8 @@ def square_detection(args: argparse.Namespace):
                 max_row = min(max_row + (40 - box_height) // 2, obj_mask_arr.shape[0] - 1)
 
             obj_mask_arr[min_row:max_row + 1, min_col:max_col + 1] = 255
-            obj_mask_box_path = os.path.join("obj_mask_box", os.path.basename(obj_mask_file))
-            Image.fromarray(obj_mask_arr).save(os.path.join(root, obj_mask_box_path))
+            mask_box_path = os.path.join("mask_box", os.path.basename(obj_mask_file))
+            Image.fromarray(obj_mask_arr).save(os.path.join(root, mask_box_path))
 
             # read target
             target_file = os.path.join(root, json_data["target"])
@@ -360,7 +360,7 @@ def square_detection(args: argparse.Namespace):
             Image.fromarray(target_arr).save(os.path.join(root, source_box_path))
 
             # Update the item with the new paths
-            json_data['obj_mask'] = obj_mask_box_path
+            json_data['mask'] = mask_box_path
             json_data['source'] = source_box_path
             updated_lines.append(json_data)
 
