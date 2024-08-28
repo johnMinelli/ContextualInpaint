@@ -172,10 +172,14 @@ class Trainer():
         device = torch.device("cuda")
         logging_dir = Path(args.output_dir, args.logging_dir)
         self.safety_checker = None
-        self.TRAIN_OBJ_MASKING = True if self.args.train_obj_ctrl is not None else TRAIN_OBJ_MASKING
-        self.HAND_ATTN_INPAINT = True if self.args.inpaint_only_hand_area is not None else HAND_ATTN_INPAINT
-        self.MASK_CTRL_OUT = True if self.args.mask_out_inpainted_area is not None else MASK_CTRL_OUT
-        self.LOSS_IN_SAM = True if self.args.sam_area_loss is not None else LOSS_IN_SAM
+        self.TRAIN_OBJ_MASKING = self.args.train_obj_ctrl
+        self.HAND_ATTN_INPAINT = self.args.inpaint_only_hand_area
+        self.MASK_CTRL_OUT = self.args.mask_out_inpainted_area
+        self.LOSS_IN_SAM = self.args.sam_area_loss
+
+        print("===================================")
+        print(f"TRAIN_OBJ_MASKING={self.TRAIN_OBJ_MASKING}, HAND_ATTN_INPAINT={self.HAND_ATTN_INPAINT}, MASK_CTRL_OUT={self.MASK_CTRL_OUT}, LOSS_IN_SAM={self.LOSS_IN_SAM}")
+        print("===================================")
 
         # Load the accelerator
         accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -218,7 +222,7 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, args.train_data_file, 512, self.tokenizer, apply_transformations=False, dilated_conditioning_mask=True) for data_dir in args.train_data_dir]
+        self.train_dataset = [DiffuserDataset(data_dir, args.train_data_file, 512, self.tokenizer, apply_transformations=False, dilated_conditioning_mask=False) for data_dir in args.train_data_dir]
         self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class

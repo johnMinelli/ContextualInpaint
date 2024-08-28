@@ -59,7 +59,7 @@ class Train_args:
         self.parser.add_argument( "--dataset_name", type=str, default=None, help=("The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private, dataset). It can also be a path pointing to a local copy of a dataset in your filesystem, or to a folder containing files that 🤗 Datasets can understand."),)
         self.parser.add_argument("--dataset_config_name", type=str, default=None, help="The config of the Dataset, leave as None if there's only one config.")
         self.parser.add_argument("--train_data_dir",  nargs='+', type=str, default=None, help="A folder containing preprocessed training data. Ignored if `dataset_name` is specified.")
-        self.parser.add_argument("--train_data_file", type=str, default=None, help="Name of the file to be searched in the `train_data_dir` containing training samples details. Ignored if `dataset_name` is specified.")
+        self.parser.add_argument("--train_data_file", type=str, default="prompt.json", help="Name of the file to be searched in the `train_data_dir` containing training samples details. Ignored if `dataset_name` is specified.")
         self.parser.add_argument("--proportion_empty_prompts", type=float, default=0, help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).")
         self.parser.add_argument("--validation_file", type=str, default="data/validation/validation.json", help="A json file detailing the files for validation which happens every `--validation_steps` and logged to `--log`.")
         self.parser.add_argument("--num_validation_images", type=int, default=4, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair")
