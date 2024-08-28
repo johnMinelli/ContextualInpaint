@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 class DiffuserDataset(Dataset):
     """ Dataset for training and validation. """
-    def __init__(self, data_dir, resolution=512, tokenizer=None, apply_transformations=False, dilated_conditioning_mask=False):
+    def __init__(self, data_dir, data_file='prompt.json', resolution=512, tokenizer=None, apply_transformations=False, dilated_conditioning_mask=False):
         self.data_dir = data_dir
         self.resolution = resolution
         self.tokenizer = tokenizer
@@ -32,7 +32,7 @@ class DiffuserDataset(Dataset):
         self.conditioning_image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False)
 
         self.data = []
-        with open(os.path.join(self.data_dir, 'prompt.json'), 'rt') as f:
+        with open(os.path.join(self.data_dir, data_file), 'rt') as f:
             for line in f:
                 self.data.append(json.loads(line))
 

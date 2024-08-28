@@ -210,7 +210,7 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, dilated_conditioning_mask=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
+        self.train_dataset = [DiffuserDataset(data_dir, args.train_data_file, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, dilated_conditioning_mask=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
         self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class

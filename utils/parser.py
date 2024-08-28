@@ -57,14 +57,12 @@ class Train_args:
                 " behaviors, so disable this argument if it causes any problems. More info:"
                 " https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html"),)
         self.parser.add_argument( "--dataset_name", type=str, default=None, help=("The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private, dataset). It can also be a path pointing to a local copy of a dataset in your filesystem, or to a folder containing files that 🤗 Datasets can understand."),)
-        self.parser.add_argument("--dataset_config_name", type=str, default=None, help="The config of the Dataset, leave as None if there's only one config.",)
-        self.parser.add_argument("--train_data_dir",  nargs='+', type=str, default=None, help=(
-                "A folder containing the training data. Folder contents must follow the structure described in"
-                " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
-                " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."),)
+        self.parser.add_argument("--dataset_config_name", type=str, default=None, help="The config of the Dataset, leave as None if there's only one config.")
+        self.parser.add_argument("--train_data_dir",  nargs='+', type=str, default=None, help="A folder containing preprocessed training data. Ignored if `dataset_name` is specified.")
+        self.parser.add_argument("--train_data_file", type=str, default=None, help="Name of the file to be searched in the `train_data_dir` containing training samples details. Ignored if `dataset_name` is specified.")
         self.parser.add_argument("--proportion_empty_prompts", type=float, default=0, help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).")
         self.parser.add_argument("--validation_file", type=str, default="data/validation/validation.json", help="A json file detailing the files for validation which happens every `--validation_steps` and logged to `--log`.")
-        self.parser.add_argument("--num_validation_images", type=int, default=4, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",)
+        self.parser.add_argument("--num_validation_images", type=int, default=4, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair")
         self.parser.add_argument("--validation_steps", type=int, default=200000000, help="Run validation every X steps. Validation consists of running the prompt `args.validation_prompt` multiple times: `args.num_validation_images` and logging the images.")
         self.parser.add_argument("--tracker_project_name", type=str, default="train_controlnet", help="The `project_name` argument passed to Accelerator.init_trackers for more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator")
         self.parser.add_argument("--rank", type=int, default=4, help="The dimension of the LoRA update matrices.")
