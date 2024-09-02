@@ -162,7 +162,7 @@ def run_masking(args: argparse.Namespace):
 
             # Save
             plt.imsave(os.path.join(source_folder, filename), rgb_im)
-            plt.imsave(os.path.join(mask_folder, filename), mask_im)
+            plt.imsave(os.path.join(mask_folder, filename), mask_im, cmap="gray")
             plt.imsave(os.path.join(target_folder, filename), target_im)
 
 
@@ -207,7 +207,7 @@ def run_pose_estimation(args: argparse.Namespace):
             v = Visualizer(np.zeros_like(im), MetadataCatalog.get(cfg.DATASETS.TRAIN[0]))
             out = v.draw_instance_predictions(outputs).get_image()[:, :, ::-1]
             # plt.imshow(out)
-            # plt.show()            
+            # plt.show()
 
             # Save
             plt.imsave(os.path.join(poses_folder, filename), out)
@@ -293,13 +293,13 @@ def run_object_detection(args: argparse.Namespace):
                             idx_hands = [l in ["hand"] for l in phrases]
                             if any(idx_objects) and len(idx_hands):
                                 obj_text = " ".join(set([t for texts, flag in zip(texts_objects, idx_objects) for t in texts if flag]))
-                                segmented_objects = masks[idx_objects][check_overlap(boxes[idx_hands], boxes[idx_objects])]
-                                obj_mask = torch.cat([segmented_objects, obj_mask.unsqueeze(0)]).sum(0).bool()
+                                segmented_objects = masks[idx_objects][check_overlap(boxes[idx_hands], boxes[idx_objects])].squeeze(0)
+                                obj_mask = torch.logical_or(segmented_objects, obj_mask).int()
                                 obj[obj_mask>0] = (torch.tensor(np.array(image_pil))/255)[obj_mask>0]
                     # save detection
                     if obj_mask.any():
                         obj_mask_file = mask_file.replace("mask", "obj_mask")
-                        plt.imsave(obj_mask_file, obj_mask.cpu().numpy())
+                        plt.imsave(obj_mask_file, obj_mask.cpu().numpy(), cmap="gray")
                         subfolder = '' if target_labels is None else '/phone' if target_labels["phone_class"] == 1 else '/cigarette' if target_labels["cigarette_class"] == 1 else '/food' if target_labels["food_class"] == 1 else ''
                         plt.imsave(mask_file.replace("mask", f"obj{subfolder}"), obj.cpu().numpy())
                         json_data["obj_mask"] = obj_mask_file.replace(root, "")
@@ -313,11 +313,13 @@ def run_object_detection(args: argparse.Namespace):
 
 
 def square_detection(args: argparse.Namespace):
-    from PIL import Image
+    import cv2
     import numpy as np
+    import os
+    import json
+    from tqdm import tqdm
 
-
-    root = args.get("input_path", DATA_PATH)+"/"
+    root = args.get("input_path", DATA_PATH) + "/"
     os.makedirs(os.path.join(root, "mask_box"), exist_ok=True)
     os.makedirs(os.path.join(root, "source_box"), exist_ok=True)
 
@@ -330,8 +332,7 @@ def square_detection(args: argparse.Namespace):
         json_data = json.loads(line)
         # read mask
         obj_mask_file = os.path.join(root, json_data["obj_mask"])
-        obj_mask_pil = Image.open(obj_mask_file).convert("L")
-        obj_mask_arr = np.array(obj_mask_pil)
+        obj_mask_arr = cv2.imread(obj_mask_file, cv2.IMREAD_GRAYSCALE)
         # get the bounding box
         rows, cols = np.where(obj_mask_arr > 0)
         if len(rows) > 0 and len(cols) > 0:
@@ -349,22 +350,21 @@ def square_detection(args: argparse.Namespace):
 
             obj_mask_arr[min_row:max_row + 1, min_col:max_col + 1] = 255
             mask_box_path = os.path.join("mask_box", os.path.basename(obj_mask_file))
-            Image.fromarray(obj_mask_arr).save(os.path.join(root, mask_box_path))
+            cv2.imwrite(os.path.join(root, mask_box_path), obj_mask_arr)
 
             # read target
             target_file = os.path.join(root, json_data["target"])
-            target_pil = Image.open(target_file).convert("RGB")
-            target_arr = np.array(target_pil)
+            target_arr = cv2.imread(target_file, cv2.IMREAD_COLOR)
             target_arr[min_row:max_row + 1, min_col:max_col + 1] = 0
             source_box_path = os.path.join("source_box", os.path.basename(target_file))
-            Image.fromarray(target_arr).save(os.path.join(root, source_box_path))
+            cv2.imwrite(os.path.join(root, source_box_path), target_arr)
 
-            # Update the item with the new paths
+            # update the item with the new paths
             json_data['mask'] = mask_box_path
             json_data['source'] = source_box_path
             updated_lines.append(json_data)
 
-    # Write the json
+    # write the json
     with open(os.path.join(root, "prompt_2.json"), 'w') as outfile:
         for line in updated_lines:
             json.dump(line, outfile)

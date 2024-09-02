@@ -177,10 +177,6 @@ class Trainer():
         self.MASK_CTRL_OUT = self.args.mask_out_inpainted_area
         self.LOSS_IN_SAM = self.args.sam_area_loss
 
-        print("===================================")
-        print(f"TRAIN_OBJ_MASKING={self.TRAIN_OBJ_MASKING}, HAND_ATTN_INPAINT={self.HAND_ATTN_INPAINT}, MASK_CTRL_OUT={self.MASK_CTRL_OUT}, LOSS_IN_SAM={self.LOSS_IN_SAM}")
-        print("===================================")
-
         # Load the accelerator
         accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
         self.accelerator = Accelerator(
