@@ -810,7 +810,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
     def num_timesteps(self):
         return self._num_timesteps
 
-    @torch.no_grad()
+
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
@@ -842,7 +842,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
-        focus=None,
+        dynamic_masking=None,
+        aux_focus_token: Optional[List[str]] = None,
         aux_focus_prompt: Optional[List[str]] = None,
         aux_focus_prompt_embeds = None,
         gradient_checkpointing: bool = False,
@@ -940,10 +941,12 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 The percentage of total steps at which the ControlNet starts applying.
             control_guidance_end (`float` or `List[float]`, *optional*, defaults to 1.0):
                 The percentage of total steps at which the ControlNet stops applying.
-            focus: Pre-generated text embeddings to search in `prompt` input argument.
-            aux_focus_prompt: (List(str), *optional*): The additional prompt to cllect attention inside the unet.
+            dynamic_masking: Flag to enable dynamic masking behaviour.
+            aux_focus_token: Token id to search in the prompt (used in self guidance behaviour or dynamic masking).
+            aux_focus_prompt: (List(str), *optional*): The additional prompt to collect attention inside the unet
+                (used in self guidance behaviour or dynamic masking).
             aux_focus_prompt_embeds (List(str), *optional*): Pre-generated text embeddings for the focus prompt. If not
-                provided, text embeddings are generated from the `focus_prompt` input argument.
+                provided, text embeddings are generated from the `aux_focus_prompt` input argument.
             clip_skip (`int`, *optional*):
                 Number of layers to be skipped from CLIP while computing the prompt embeddings. A value of 1 means that
                 the output of the pre-final layer will be used for computing the prompt embeddings.
@@ -1015,8 +1018,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
         ) 
         guess_mode = guess_mode or global_pool_conditions
 
-        if aux_focus_prompt:
-            enable_prompt_focus = True
+        self.num_focus_prompts = 0
+        if aux_focus_prompt is not None:
             if batch_size == 1:
                 if isinstance(aux_focus_prompt, str):
                     self.num_focus_prompts = 1
@@ -1026,27 +1029,30 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             else:
                 self.num_focus_prompts = 1 if isinstance(aux_focus_prompt[0], str) else len(aux_focus_prompt[0])
         elif aux_focus_prompt_embeds is not None:
-            enable_prompt_focus = True
             self.num_focus_prompts = aux_focus_prompt_embeds.shape[0]
             if len(aux_focus_prompt) == 0: focus_prompt = ["<unspecified>"]*self.num_focus_prompts  # patch
-        elif focus is not None:
-            enable_prompt_focus = True
-            self.num_focus_prompts = 0
-        else:
-            enable_prompt_focus = False
-            self.num_focus_prompts = 0
+
+        if dynamic_masking:
+            if aux_focus_token is None and self.num_focus_prompts == 0:
+                logger.warning("WARN: `dynamic_masking` parameter set `True` but neither `aux_focus_token` nor `aux_focus_prompt_embeds` and `aux_focus_prompt` have been specified.")
+                dynamic_masking = False
+
+        # initialize mask smoother, attention store and mod the unet
+        self.attn_cum_map = torch.tensor([], device=device)
+        self.attn_cum_filter = torch.tensor([], device=device)
+        self.attn_filter = None
+        self.attn_mask = None
+        if self.attention_store is None or not self.unet.mod:
+            self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance, device=device)
+            self.mod_unet()
+            self.unet.mod = True
+        self.attention_store.step(False)
 
         # Focus and self guidance require memorization of unet attention maps during execution
-        if enable_prompt_focus or self_guidance_scale > 0:
-            # initialize mask smoother, attention store and mod the unet
-            self.attn_cum_map = torch.tensor([], device=device)
-            self.attn_cum_filter = torch.tensor([], device=device)
-            self.attn_filter = None
-            self.attn_mask = None
-            if self.attention_store is None or not self.unet.mod:
-                self.attention_store = AttentionStore(store_averaged_over_steps=True, batch_size=batch_size*num_images_per_prompt, classifier_free_guidance=do_classifier_free_guidance, device=device)
-                self.mod_unet()
-                self.unet.mod = True
+        if dynamic_masking or self_guidance_scale > 0:
+            self.attention_store.enable()
+        else:
+            self.attention_store.disable()
 
         # 3. Encode input prompt
         text_encoder_lora_scale = self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
@@ -1094,7 +1100,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 else:
                     logger.warning("`controlnet_prompt_seq_projection` is True but no text_encoder with projection is given.")
 
-        if enable_prompt_focus and self.num_focus_prompts > 0:
+        if self.num_focus_prompts > 0:  # used for dynamic masking or for self guidance, depending on the implementation
             # flatten batched lists of focus prompts
             if batch_size > 1 and self.num_focus_prompts > 1:
                 aux_focus_prompt = [p for batch in aux_focus_prompt for p in batch]
@@ -1278,11 +1284,12 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                     # Full inpaint: feed SD with [image, mask and masked image] to let the model predict noise conscious of the inpainting process
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)  # ((fp+cfg)*b*n,(c_vae+c+c_vae),h_vae,w_vae)
 
+                skip_controlnet_step = dynamic_masking and i==0  # workaround (*)
                 if gradient_checkpointing:
                     noise_pred = checkpoint.checkpoint(self.unet,
                     latent_model_input, t, prompt_embeds, None, timestep_cond, None, self.cross_attention_kwargs, None,
-                           None if controlnet is None else [d.detach() for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
-                           None if controlnet is None else mid_block_res_sample.detach() if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None, None, None, False,
+                           None if controlnet is None or skip_controlnet_step else [d.detach() for d in down_block_res_samples],
+                           None if controlnet is None or skip_controlnet_step else mid_block_res_sample.detach(), None, None, False,
                            use_reentrant=False)[0]
                 else:
                     noise_pred = self.unet(
@@ -1291,8 +1298,8 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         encoder_hidden_states=prompt_embeds,
                         timestep_cond=timestep_cond,
                         cross_attention_kwargs=self.cross_attention_kwargs,
-                        down_block_additional_residuals=None if controlnet is None else [d for d in down_block_res_samples] if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,  # workaround (*)
-                        mid_block_additional_residual=None if controlnet is None else mid_block_res_sample if not enable_prompt_focus or (i>0 and enable_prompt_focus) else None,
+                        down_block_additional_residuals=None if controlnet is None or skip_controlnet_step else [d.detach() for d in down_block_res_samples],
+                        mid_block_additional_residual=None if controlnet is None or skip_controlnet_step else mid_block_res_sample.detach(),
                         return_dict=False,
                     )[0]
 
@@ -1309,10 +1316,10 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                             target = centroid_target[res]
                             centroid_obj = compute_centroid(attn_map_obj * attn_mask_obj)
                             centroid_hand = compute_centroid(attn_map_hand * attn_mask_hand).detach()
-                            target[centroid_hand.sum(-1) != 0] = centroid_hand[centroid_hand.sum(-1) != 0]  # complete the current target with hand area
+                            centroid_hand = centroid_hand[centroid_hand.sum(-1) != 0]  # patch to remove false corner detections
 
                             target_loss += 0  # F.l1_loss(attn_map_hand * attn_mask_hand, (attn_map_hand * attn_mask_hand * 1000).detach())
-                            distance_loss += (F.l1_loss(centroid_obj, target, reduction="none").mean(-1) / res) + (F.l1_loss(centroid_hand, target, reduction="none").mean(-1) / res)*(centroid_hand.sum(-1) == 0)
+                            distance_loss += (F.l1_loss(centroid_obj, target, reduction="none").mean(-1) / res) + (F.l1_loss(centroid_hand, target, reduction="none").mean(-1) / res)
                             size_loss += 0  # torch.sum(attn_mask_obj) - (0.01 * attn_mask_obj.numel())
 
                             if (distance_loss+size_loss+target_loss).isnan().any():
@@ -1346,19 +1353,19 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
 
                     denoised_latents = (1 - latents_inpaint_mask) * init_noisy_latents + latents_inpaint_mask * denoised_latents
 
-                if enable_prompt_focus:
-                    if self.num_focus_prompts > 0:  # use prompt ids
+                if dynamic_masking:
+                    if aux_focus_token is not None:  # use prompt ids
+                        tokens_position = torch.cat([torch.stack([torch.tensor([p_ == aux_focus_token for p_ in p[0]])] * num_images_per_prompt) for p in prompt_ids.chunk(batch_size)])
+                    elif self.num_focus_prompts > 0:  # search the token in prompt 
                         tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
-                    else:  # use focus token
-                        tokens_position = torch.cat([torch.stack([torch.tensor([p_ == focus for p_ in p[0]])] * num_images_per_prompt) for p in prompt_ids.chunk(batch_size)])
-                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 16, 0, tokens_position, 0.98)
+                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.995)
                     # self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
                     # self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
                     self.attn_mask = attn_mask.unsqueeze(1)  # store to be used in next step
                     self.attn_cum_map = attn_map if self.attn_cum_map.size(0) == 0 else torch.stack([self.attn_cum_map, attn_map]).sum(0)  # (viz helper)
-                    self.attention_store.step(False)
 
                 # Cycle and callbacks
+                if self.attention_store is not None: self.attention_store.step(False)
                 noisy_latents = denoised_latents
 
                 if callback_on_step_end is not None:
@@ -1416,6 +1423,10 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             self.final_offload_hook.offload()
 
         if not return_dict:
-            return image, has_nsfw_concept
-
+            # plt.title(str(attn_map.detach().cpu().max()))
+            # plt.imshow(self.attn_cum_map.detach().cpu()[0])
+            # plt.show()
+            if cg_step is not None:
+                return image, cg_image
+            return image
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)

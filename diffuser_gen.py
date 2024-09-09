@@ -108,7 +108,7 @@ pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         controlnet=controlnet,
         controlnet_text_encoder=controlnet_text_encoder,
-        controlnet_prompt_seq_projection=False,
+        controlnet_prompt_seq_projection=True,
         safety_checker=None,
         revision=args.revision,
         torch_dtype=torch.float32
@@ -123,8 +123,7 @@ pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 # unet_state_dict = {f'{k.replace("unet.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")}
 # unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
 # b = set_peft_model_state_dict(pipeline.unet, unet_state_dict, adapter_name="default")
-fix = "lora/checkpoint-238000"
-fix = "unet_lora64_32-fix/lora-fixed/checkpoint-136000"
+fix = "unet_lora64_32-fix/lora-weighted/checkpoint-150000"
 LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})
 lyco = create_lycoris(pipeline.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
 lyco.apply_to()
@@ -159,9 +158,9 @@ procedural_dataloader = torch.utils.data.DataLoader(procedural_dataset, shuffle=
 for gen_id, batch in enumerate(procedural_dataloader):
     with torch.no_grad():
         with torch.autocast(f"cuda"):
-            pred_images, _ = pipeline(prompt=batch["prompt"], controlnet_prompt=batch["control_prompt"], negative_prompt=batch["neg_prompt"], focus=HAND_TOKEN, class_conditional=torch.tensor(batch["class"], device=pipeline.device) if class_cond else None,
+            pred_images = pipeline(prompt=batch["prompt"], controlnet_prompt=batch["control_prompt"], negative_prompt=batch["neg_prompt"], aux_focus_token=HAND_TOKEN, dynamic_masking=True, class_conditional=torch.tensor(batch["class"], device=pipeline.device) if class_cond else None,
                                   image=batch["image"], mask_image=batch["mask"], conditioning_image=batch["mask_conditioning"], height=512, width=512, self_guidance_scale=0,
-                                  strength=1.0, controlnet_conditioning_scale=[0.0, 0.0], num_inference_steps=40, guidance_scale=8, guess_mode=True, generator=generator, gradient_checkpointing=args.gradient_checkpointing, return_dict=False)
+                                  strength=1.0, controlnet_conditioning_scale=1.0, num_inference_steps=40, guidance_scale=8, guess_mode=True, generator=generator, gradient_checkpointing=args.gradient_checkpointing, return_dict=False)
             object_names = [[ctrl_obj] if cat!="default" else ["food", "drink", "phone", "cigarette"] for cat, ctrl_obj in zip(batch["category"], [b[-1] for b in batch["control_prompt"]] if type(controlnet) == list else batch["control_prompt"])]
             oih_results = check_oih_dino(pred_images, object_names)
 

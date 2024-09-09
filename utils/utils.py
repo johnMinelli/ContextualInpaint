@@ -51,11 +51,11 @@ def multi_controlnet_helper(controlnet, encoder_hidden_states, conditioning_imag
                                         conditioning_scale=scale,
                                         guess_mode=guess_mode, **controlnet_args)
 
-        # Apply attention focused mask
-        if focus_mask is not None:
-            # match the size and apply mask
-            mid_sample = mask_block(image[:,:1], mid_sample)
-            down_samples = [mask_block(image[:,:1], block) for block in down_samples]
+        # # Apply attention focused mask
+        # if focus_mask is not None:
+        #     # match the size and apply mask
+        #     mid_sample = mask_block(image[:,:1], mid_sample)
+        #     down_samples = [mask_block(image[:,:1], block) for block in down_samples]
 
         # Merge samples
         if i == 0:
