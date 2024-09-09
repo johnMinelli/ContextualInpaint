@@ -80,7 +80,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         text_encoder=text_encoder,
         controlnet_text_encoder=controlnet_text_encoder,
         controlnet_image_encoder=controlnet_image_encoder,
-        controlnet_prompt_seq_projection=True if args.train_obj_ctrl is not None else TRAIN_OBJ_MASKING,
+        controlnet_prompt_seq_projection=True,
         tokenizer=tokenizer,
         unet=unet_clone,
         controlnet=controlnet,
@@ -111,23 +111,22 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
     neg_prompts = replicate(validation_data.get('validation_neg_prompts', []), n)
     control_prompts = replicate(validation_data.get('validation_control_prompts', []), n)
     focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
-    class_conditional = torch.tensor(validation_data.get('validation_class', [])).to(accelerator.device)
+    class_conditional = replicate(torch.tensor(validation_data.get('validation_class', [])).to(accelerator.device), n)
 
     image_logs = []
     for prompt, neg_prompt, image, mask, condition, control_prompt, focus_prompt, class_ in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts, class_conditional):
         image = Image.open(image).convert("RGB") if image is not None else None
-        mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
         mask = Image.open(mask).convert("L") if mask is not None else None
-        condition = Image.open(condition).convert("RGB") if condition is not None else None
+        mask_conditioning = Image.open(condition).convert("RGB") if condition is not None else None
         focus_prompt = [focus_prompt] if focus_prompt else None
 
         with torch.no_grad():
             pred_images = []
             for i in range(args.num_validation_images):
                 with torch.autocast(f"cuda"):
-                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, class_conditional=class_, 
-                                          image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
-                                          strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
+                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, aux_focus_prompt=focus_prompt, dynamic_masking=i>1, class_conditional=class_,
+                                          image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, self_guidance_scale=0,
+                                          strength=1.0, controlnet_conditioning_scale=1.0, num_inference_steps=50, guidance_scale=7.5, guess_mode=True, generator=generator).images[0]
                 pred_images.append(pred_image)
 
             image_logs.append({"reference": image, "images": pred_images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
@@ -148,14 +147,14 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         elif tracker.name == "wandb":
             formatted_images = []
 
-            for log  in image_logs:
+            for log in image_logs:
                 images = log["images"]
                 prompt = log["prompt"]
                 image = log["reference"]
 
                 formatted_images.append(wandb.Image(image, caption="Reference"))
                 for image in images:
-                    if image is not None: 
+                    if image is not None:
                         image = wandb.Image(image, caption=prompt)
                         formatted_images.append(image)
 
@@ -428,6 +427,7 @@ class Trainer():
 
         # Move vae, and text_encoder to device and cast to weight_dtype
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_image_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
@@ -595,7 +595,7 @@ class Trainer():
                         torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
-                        if self.MASK_CTRL_OUT:  # TODO this has to be re-evaluated as we are going to train on their data
+                        if self.MASK_CTRL_OUT:
                             mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
                             down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
                         noisy_latents_model_input_unet = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
@@ -611,7 +611,7 @@ class Trainer():
                     if self.HAND_ATTN_INPAINT:
                         # First cycle only to store the unet attention, then the one using it
                         tokens_position = torch.cat([torch.stack([torch.tensor([p_ == 2463 for p_ in p[0]])]) for p in encoder_ids.chunk(bs)])
-                        attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 16, 0, tokens_position, 0.965)
+                        attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.99)
                         self.attention_store.step(False)
 
                         conditioning_image = torch.logical_and(F.interpolate(attn_mask.unsqueeze(1).to(torch.float32), image.shape[-2:]).expand(*image.shape), conditioning_image > 0.5).to(torch.float32)
@@ -624,7 +624,7 @@ class Trainer():
                             return_dict=False,
                         )
                         if mask is not None and self.unet.config.in_channels == 9:
-                            if self.MASK_CTRL_OUT:  # TODO again this should be re-evaluated
+                            if self.MASK_CTRL_OUT:
                                 mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
                                 down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
                             noisy_latents_model_input_unet = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)

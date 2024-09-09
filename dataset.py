@@ -38,7 +38,7 @@ class DiffuserDataset(Dataset):
 
         self.image_column = "target"
         self.prompt_column = "prompt"
-        self.conditioning_image_column = "mask"
+        self.conditioning_image_column = "conditioning"
         self.mask_column = "mask"
         self.obj_text_column = "obj_text"
         self.obj_image_column = "obj_image"
@@ -89,7 +89,7 @@ class DiffuserDataset(Dataset):
             if self.dilated_conditioning_mask:
                 conditioning_image = cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
             else:
-                conditioning_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, mask_filename)), cv2.COLOR_BGR2RGB)
+                conditioning_image = cv2.cvtColor(cv2.imread(os.path.join(self.data_dir, conditioning_filename)), cv2.COLOR_BGR2RGB)
 
         except Exception as e:
             print("ERR:", os.path.join(self.data_dir, target_filename), os.path.join(self.data_dir, mask_filename), os.path.join(self.data_dir, conditioning_filename), str(e))
@@ -147,7 +147,7 @@ class DiffuserDataset(Dataset):
                 mask = resize_transform(mask)
                 conditioning = resize_transform(conditioning)
 
-        return {"image": target, "txt": prompt_class+prompt_image, "no_txt": "", "mask": mask, **({"obj_mask": obj_mask} if obj_mask is not None else {}),
+        return {"image": target, "txt": prompt_image, "no_txt": "", "mask": mask, **({"obj_mask": obj_mask} if obj_mask is not None else {}),
                 "ctrl_txt": obj_text, "ctrl_txt_image": obj_image,  "conditioning": conditioning,
                 "class": class_id}
 
