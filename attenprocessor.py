@@ -18,6 +18,13 @@ class AttentionStore():
         self.batch_size = batch_size
         self.cfg = classifier_free_guidance
         self.smoothing = GaussianSmoothing(device, 3, 2)
+        self.enabled = False
+
+    def enable(self):
+        self.enabled = True
+
+    def disable(self):
+        self.enabled = False
 
     def attach_unet(self, unet):
             attn_procs = {}
@@ -45,19 +52,21 @@ class AttentionStore():
                 "down_self": [], "mid_self": [], "up_self": []}
 
     def __call__(self, attn, is_cross: bool, place_in_unet: str, num_heads: int):
-        # inbatch_size = 1 (uncond) + 1 (cond) + n (edit prompts)
-        # attn.shape = batch_size * (inbatch_size * head_size), seq_len query, seq_len_key
-        skip = int(self.cfg)  # skip unconditional
+        if self.enabled:
+            # inbatch_size = 1 (uncond) + 1 (cond) + n (edit prompts)
+            # attn.shape = batch_size * (inbatch_size * head_size), seq_len query, seq_len_key
+            skip = int(self.cfg)  # skip unconditional
 
-        attn = torch.stack(attn.split(self.batch_size)).permute(1, 0, 2, 3) # create batch_size dimension
-        attn = attn[:, skip * num_heads:].reshape(self.batch_size, -1, num_heads, *attn.shape[-2:])  # create num_heads dimension
-        # attn.shape = batch_size, (inbatch_size - skip), num_heads, seq_len query, seq_len_key
-        self.forward(attn, is_cross, place_in_unet)
+            attn = torch.stack(attn.split(self.batch_size)).permute(1, 0, 2, 3) # create batch_size dimension
+            attn = attn[:, skip * num_heads:].reshape(self.batch_size, -1, num_heads, *attn.shape[-2:])  # create num_heads dimension
+            # attn.shape = batch_size, (inbatch_size - skip), num_heads, seq_len query, seq_len_key
+            self.forward(attn, is_cross, place_in_unet)
 
     def forward(self, attn, is_cross: bool, place_in_unet: str):
-        key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
-        if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
-            self.step_store[key].append(attn)
+        if self.enabled:
+            key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
+            if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
+                self.step_store[key].append(attn)
 
     def step(self, store_current_step=True):
         if store_current_step:
