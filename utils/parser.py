@@ -104,7 +104,7 @@ class Eval_args:
         self.parser.add_argument("--train_data_dir", nargs='+', type=str, default=None, help="A folder containing preprocessed training data.")
         self.parser.add_argument("--train_data_file", type=str, default="prompt.json", help="Name of the file to be searched in the `train_data_dir` containing training samples details.")
         self.parser.add_argument("--steps", type=int, default=50, help="Denoising steps.")
-        self.parser.add_argument("--num_validation_images", type=int, default=4, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",)
+        self.parser.add_argument("--num_validation_images", type=int, default=None, help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",)
         self.parser.add_argument("--gradient_checkpointing", action="store_true", default=True, help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",)
 
     def parse_args(self, input_args=None):

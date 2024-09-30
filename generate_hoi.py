@@ -115,13 +115,16 @@ controlnet_text_encoder = None
 num_controlnets = 0
 class_cond = False
 if args.controlnet_model_name_or_path is not None:
-    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, torch_dtype=torch.float32)
-    w_dict = load_file(os.path.join(args.controlnet_model_name_or_path, "diffusion_pytorch_model.safetensors"))
-    if w_dict.get("class_embedding.weight", None) is not None:
-        class_cond = True
-        controlnet.class_embedding = torch.nn.Embedding(4, 1280)
-    controlnet.load_state_dict(w_dict)
-    num_controlnets = 1
+    controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path]
+    for net_path, net in zip(args.controlnet_model_name_or_path, controlnet):
+        w_dict = load_file(os.path.join(net_path, "diffusion_pytorch_model.safetensors"))
+        if w_dict.get("class_embedding.weight", None) is not None:
+            class_cond = True
+            net.class_embedding = torch.nn.Embedding(4, 1280)
+        net.load_state_dict(w_dict)
+    num_controlnets = len(controlnet)
+    if num_controlnets == 1:
+        controlnet = controlnet[0]
     controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
 
 # init pipeline
@@ -179,7 +182,7 @@ for gen_id, batch in enumerate(dataloader):
         with torch.autocast(f"cuda"):
             pred_images = pipeline(prompt=batch["txt"], controlnet_prompt=batch["ctrl_txt"], negative_prompt=batch["neg_txt"], aux_focus_prompt=batch["neg_txt"], dynamic_masking=True,
                                   image=batch["image"], mask_image=batch["mask"], conditioning_image=batch["conditioning"], height=512, width=512, 
-                                  strength=1.0, controlnet_conditioning_scale=1.0, num_inference_steps=30, guidance_scale=7.5, self_guidance_scale=0,
+                                  strength=1.0, controlnet_conditioning_scale=0.8, num_inference_steps=50, guidance_scale=7.5, self_guidance_scale=0,
                                   guess_mode=True, generator=generator, gradient_checkpointing=args.gradient_checkpointing, return_dict=False)
             hoi_results = check_hoi_dino(pred_images, batch["mask"], [object_categories[int(sc)] for sc in batch["subject_category"]], [object_categories[int(oc)] for oc in batch["object_category"]], [json.loads(b2i) for b2i in batch["boxes_to_ignore"]])
 
