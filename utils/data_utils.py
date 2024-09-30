@@ -68,7 +68,7 @@ def mask_augmentation(mask_image, expansion_p=1., patch_p=1., min_expansion_fact
         expanded_contour = expand_contour(contour, expansion_factor)
         mask = cv2.drawContours(mask, [expanded_contour], 0, 255, -1)
     # Randomly apply additional patches
-    if np.random.random() < patch_p:
+    if patches > 0 and np.random.random() < patch_p:
         num_patches = np.random.randint(1, patches)
         mask = apply_additional_patches(mask, num_patches, contour)
 
