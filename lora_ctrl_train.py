@@ -21,7 +21,6 @@ import os
 import shutil
 from pathlib import Path
 
-import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -29,8 +28,8 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from lycoris import LycorisNetwork, create_lycoris
-from safetensors.torch import load_file, save_file
+from lycoris import create_lycoris, LycorisNetwork
+from diffusers.training_utils import cast_training_params
 
 from utils.dataset import DiffuserDataset
 from huggingface_hub import create_repo, upload_folder
@@ -41,10 +40,9 @@ from transformers import AutoTokenizer, CLIPVisionModel, CLIPTextModel, CLIPText
     CLIPVisionModelWithProjection
 
 import diffusers
-from diffusers import (AutoencoderKL, ControlNetModel, UNet2DConditionModel, UniPCMultistepScheduler,
-                       DDPMScheduler, PNDMScheduler)
+from diffusers import (AutoencoderKL, ControlNetModel, UNet2DConditionModel, DDPMScheduler, PNDMScheduler)
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available, convert_unet_state_dict_to_peft
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
 from pipeline.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
@@ -53,24 +51,30 @@ from utils.utils import import_text_encoder_from_model_name_or_path, replicate, 
 
 if is_wandb_available():
     import wandb
-    # wandb.init(project="train_controlnet", resume="b0ylmazx")
+    # wandb.init(project="train_controlnet", resume="wrjd7704")
 
 
 logger = get_logger(__name__)
 # Implementation of training procedure with CLIP images/text. The images used are the cropped and resized objects present in the prompt.json with the name of "ctrl_txt_image".
 # Note, CLIPVisualEnc and CLIPTextEnc give in output (a different number of tokens, but this is not relevant, and) an embedding with a sifferent embedding size. In the normal implementation it does exists a projection layer being applied only to the last/first(?) token of the two output and project it in the common hidden dimension (that is the same as the CLIPTextEnc). This is standard to use it for all the tokens and have sequences of tokens representing image or text at same dimension.
 MULTIMODAL_CROSS_ATTN = False
-# Implementation of masking on the output of the ControlNet. Training on data different from inference (web scraped objects anc inpainting in Verizon data) seems to require the masking as the effect of the ControlNet is not limited to the ideal mask provided as its input. 
-MASK_CTRL_OUT = False
 # Implementation of a weighted loss in the segmented area of the object (from Segment Anything on top of GroundingDINO detection). The object mask should be present in the prompt.json with name "obj_mask".
 LOSS_IN_SAM = False
 
-def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
+def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, lyco_state, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
     # get trained network
     controlnet = accelerator.unwrap_model(controlnet)
     # costly deepcopy but necessary if you mod cross attention layers
     unet_clone = copy.deepcopy(unet)
+    LycorisNetwork.apply_preset({"target_module": ["ResnetBlock2D"]})
+    lyco = create_lycoris(unet_clone, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
+    lyco.apply_to()
+    lyco = lyco.cuda()
+    lyco.load_state_dict(lyco_state, strict=False)
+    lyco.restore()
+    lyco.cuda()
+    lyco.merge_to(1.0)
 
     pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -166,7 +170,6 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
 class Trainer():
     def __init__(self, args):
         self.args = args
-        device = torch.device("cuda")
         logging_dir = Path(args.output_dir, args.logging_dir)
         self.safety_checker = None
 
@@ -224,23 +227,12 @@ class Trainer():
         self.controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
         self.controlnet_image_encoder = CLIPVisionModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
         self.vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
-        self.unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision)
+        self.unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision)  # , local_files_only=True
         if args.controlnet_model_name_or_path:
             logger.info("Loading existing controlnet weights")
             self.controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
         else:
             logger.info("Initializing controlnet weights from unet")
-
-            if args.lora is not None:
-                self.unet.cuda()
-                LycorisNetwork.apply_preset({"target_module": ["Attention"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
-                lyco = create_lycoris(self.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
-                lyco.apply_to()
-                lyco_state = torch.load(os.path.join(args.lora, "lycorice.ckpt"), map_location=device)
-                lyco.load_state_dict(lyco_state)
-                lyco.cuda()
-                lyco.merge_to(1.0)
-
             net_for_w = copy.deepcopy(self.unet)
             if self.unet.config.in_channels != 4:
                 net_for_w.conv_in.weight = torch.nn.Parameter(self.unet.conv_in.weight[:,:4])
@@ -249,68 +241,69 @@ class Trainer():
             if args.use_classemb:
                 self.controlnet.class_embedding = torch.nn.Embedding(4, 1280)
 
-        # `accelerate` 0.16.0 will have better support for customized saving
-        if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-            # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-            def save_model_hook(models, weights, output_dir):
-                if self.accelerator.is_main_process:
-                    i = len(weights) - 1
+        def unwrap_model(model):
+            model = self.accelerator.unwrap_model(model)
+            from diffusers.utils.torch_utils import is_compiled_module
+            model = model._orig_mod if is_compiled_module(model) else model
+            return model
 
-                    sub_dirs = ["controlnet", "unet"]
-                    while len(weights) > 0:
-                        weights.pop()
-                        model = models[i]
-                        model.save_pretrained(os.path.join(output_dir, sub_dirs[i]))
-                        i -= 1
+        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+        def save_model_hook(models, weights, output_dir):
+            if self.accelerator.is_main_process:
+                self.lyco.save_weights(os.path.join(output_dir, "lycorice.ckpt"), None, None)
 
-            def load_model_hook(models, input_dir):
-                while len(models) > 0:
-                    # pop models so that they are not loaded again
-                    model = models.pop()
-                    if isinstance(model, ControlNetModel):
-                        # load diffusers style into model
-                        # load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                        # model.register_to_config(**load_model.config)
+        def load_model_hook(models, input_dir):
+            unet_ = None
+            text_encoder_ = None
 
-                        model.load_state_dict(load_file(os.path.join(input_dir,"controlnet/diffusion_pytorch_model.safetensors")))
-                        # del load_model
-
-            def enable_models_cpu_offload():
-                """
-                Offloads all models to CPU using accelerate, reducing memory usage with a low impact on performance. Compared
-                to `enable_sequential_cpu_offload`, this method moves one whole model at a time to the GPU when its `forward`
-                method is called, and the model remains in GPU until the next model runs. Memory savings are lower than with
-                `enable_sequential_cpu_offload`, but performance is much better due to the iterative execution of the `unet`.
-                """
-                if version.parse(accelerate.__version__) >= version.parse("0.17.0.dev0"):
-                    from accelerate import cpu_offload_with_hook
+            while len(models) > 0:
+                model = models.pop()
+                if isinstance(model, type(unwrap_model(self.unet))):
+                    unet_ = model
                 else:
-                    raise ImportError("`enable_model_cpu_offload` requires `accelerate v0.17.0` or higher.")
+                    raise ValueError(f"unexpected save model: {model.__class__}")
 
-                hook = None
-                for cpu_offloaded_model in [self.vae, self.text_encoder, self.controlnet_text_encoder]:
-                    _, hook = cpu_offload_with_hook(cpu_offloaded_model, device, prev_module_hook=hook)
+            # mmm you don't have access to the lyco net here
+            # lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))
+            # self.lyco.load_state_dict(lyco_state)
 
-                if self.safety_checker is not None:
-                    # the safety checker can offload the vae again
-                    _, hook = cpu_offload_with_hook(self.safety_checker, device, prev_module_hook=hook)
+            # Make sure the trainable params are in float32. This is again needed since the base models are in `weight_dtype`. More details:
+            # https://github.com/huggingface/diffusers/pull/6514#discussion_r1449796804
+            if args.mixed_precision == "fp16":
+                models = [unet_]
+                if args.train_text_encoder:
+                    models.append(text_encoder_)
 
-                # control net hook has be manually offloaded as it alternates with unet
-                _, hook = cpu_offload_with_hook(self.controlnet, device, hook)
+                # only upcast trainable parameters (LoRA) into fp32
+                cast_training_params(models, dtype=torch.float32)
 
-                # We'll offload the last model manually.
-                self.final_offload_hook = hook
-
-            self.accelerator.register_save_state_pre_hook(save_model_hook)
-            self.accelerator.register_load_state_pre_hook(load_model_hook)
-            if args.enable_cpu_offload: enable_models_cpu_offload()
+        self.accelerator.register_save_state_pre_hook(save_model_hook)
+        self.accelerator.register_load_state_pre_hook(load_model_hook)
 
         self.vae.requires_grad_(False)
         self.unet.requires_grad_(False)
-        self.text_encoder.requires_grad_(False)
+        self.controlnet.requires_grad_(False)
         self.controlnet_image_encoder.requires_grad_(False)
         self.controlnet_text_encoder.requires_grad_(False)
-        self.controlnet.train()
+        self.text_encoder.requires_grad_(False)
+
+        LycorisNetwork.apply_preset({"target_module": ["ResnetBlock2D"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
+        self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
+        self.lyco.apply_to()
+        self.lyco.cuda()
+
+        # Setup LoRA weights to the attention layers
+        # It's important to realize here how many attention weights will be added and of which sizes
+        # The sizes of the attention layers consist only of two different variables:
+        # 1) - the "hidden_size", which is increased according to `unet.config.block_out_channels`.
+        # 2) - the "cross attention size", which is set to `unet.config.cross_attention_dim`.
+
+        # Let's first see how many attention processors we will have to set.
+        # For Stable Diffusion, it should be equal to:
+        # - down blocks (2x attention layers) * (2x transformer layers) * (3x down blocks) = 12
+        # - mid blocks (2x attention layers) * (1x transformer layers) * (1x mid blocks) = 2
+        # - up blocks (2x attention layers) * (3x transformer layers) * (3x down blocks) = 18
+        # => 32 layers
 
         # Settings for optimization
         if args.enable_xformers_memory_efficient_attention:
@@ -323,22 +316,8 @@ class Trainer():
                         "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                     )
                 self.unet.enable_xformers_memory_efficient_attention()
-                self.controlnet.enable_xformers_memory_efficient_attention()
             else:
                 raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-        if args.gradient_checkpointing:
-            self.controlnet.enable_gradient_checkpointing()
-
-        # Check that all trainable models are in full precision
-        if self.accelerator.unwrap_model(self.controlnet).dtype != torch.float32:
-            low_precision_error_string = (
-                " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-                " doing mixed precision training, copy of the weights should still be float32."
-            )
-            raise ValueError(
-                f"Controlnet loaded as datatype {self.accelerator.unwrap_model(self.controlnet).dtype}. {low_precision_error_string}"
-            )
 
         # Enable TF32 for faster training on Ampere GPUs,
         # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -362,14 +341,8 @@ class Trainer():
         else:
             optimizer_class = torch.optim.AdamW
 
-        # pass controlnet and (optionally) sd parameters to optimizer
-        params = list(self.controlnet.parameters())
-        if args.sd_unlock >= 0:
-            params += self.unet.up_blocks.parameters()
-            params += self.unet.conv_norm_out.parameters()
-
         self.optimizer = optimizer_class(
-            params,
+            list(filter(lambda p: p.requires_grad, self.lyco.parameters())),
             lr=args.learning_rate,
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
@@ -401,16 +374,13 @@ class Trainer():
             self.weight_dtype = torch.bfloat16
 
         # Prepare everything with accelerator library
-        if args.sd_unlock >= 0:
-            self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler)
-        else:
-            self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler)
-            self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.unet, self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.unet, self.controlnet, self.optimizer, self.train_dataloader, self.lr_scheduler)
 
         # Move vae, and text_encoder to device and cast to weight_dtype
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.controlnet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.controlnet_image_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         # Init class to have access to utility functions (refactoring to static methods would be nicer)
@@ -453,15 +423,10 @@ class Trainer():
                 args.resume = None
                 self.initial_global_step = 0
             else:
-                if args.sd_unlock > 0:
-                    a = load_file(os.path.join(args.output_dir, path, "controlnet", "diffusion_pytorch_model.safetensors"))
-                    a.update({f"up_blocks.{k}":v for k,v in self.unet.up_blocks.state_dict().items()})
-                    a.update({f"conv_norm_out.{k}":v for k,v in self.unet.conv_norm_out.state_dict().items()})
-                    shutil.copytree(os.path.join(args.output_dir, path), os.path.join(args.output_dir, path + "_sd"), dirs_exist_ok=True)
-                    path = path + "_sd"
-                    save_file(a, os.path.join(args.output_dir, path, "controlnet", "diffusion_pytorch_model.safetensors"))
                 self.accelerator.print(f"Resuming from checkpoint {path}")
                 self.accelerator.load_state(os.path.join(args.output_dir, path))
+                lyco_state = torch.load(os.path.join(os.path.join(args.output_dir, path), "lycorice.ckpt"))
+                self.lyco.load_state_dict(lyco_state)
                 self.global_step = int(path.split("-")[1])
 
                 self.initial_global_step = self.global_step
@@ -483,19 +448,10 @@ class Trainer():
             disable=not self.accelerator.is_local_main_process,
         )
 
-        training_nets = [self.controlnet]
         for epoch in range(self.first_epoch, args.num_train_epochs):
+            self.unet.train()
             for step, batch in enumerate(self.train_dataloader):
-                if args.sd_unlock >= 0 and epoch >= args.sd_unlock:
-                    # Start training the unet as well, in the middle of the ControlNet training
-                    args.sd_unlock = -1
-                    self.unet.up_blocks.requires_grad_(True)
-                    self.unet.conv_norm_out.requires_grad_(True)
-                    self.unet.conv_act.requires_grad_(True)
-                    self.unet.conv_out.requires_grad_(True)
-                    training_nets = [self.controlnet, self.unet]
-
-                with (self.accelerator.accumulate(*training_nets)):
+                with self.accelerator.accumulate(self.unet):
                     # Convert images to latent space
                     image = batch["image"].to(dtype=self.weight_dtype)
                     mask = batch.get("mask").to(dtype=self.weight_dtype) if "mask" in batch else None
@@ -508,9 +464,6 @@ class Trainer():
                     # Sample random noise and add it to the latents according to the noise magnitude at each timestep (forward diffusion process)
                     noise = torch.randn_like(latents)
 
-                    # if mask is not None and self.unet.config.in_channels == 4:
-                    #     noise[torch.nn.functional.interpolate(mask, size=noise.shape[-2:]).expand(noise.shape)==0]=0
-
                     noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
                     noisy_latents_model_input = noisy_latents
                     timesteps_model_input = timesteps
@@ -521,13 +474,9 @@ class Trainer():
                         masked_image[mask.expand(image.shape) > 0.5] = 0  # 0 masking in a [-1,1] image because this is what the unet wants
                         mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, 1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
 
-                    # Control Image
-                    conditioning_image = self.pipe_utils.prepare_conditioning_image(conditioning_image, 1, self.accelerator.device, self.weight_dtype, do_classifier_free_guidance=False)
-
-                    # Prompt to embeddings
                     flag_image_as_hid_prompt = (np.random.random() > 0.5) if MULTIMODAL_CROSS_ATTN else False
 
-                    encoder_hidden_states, encoder_ids, _ = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tokenizer_output=True, return_tuple=False)
+                    encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
                     encoder, ctrl_prompt = (self.controlnet_image_encoder, batch["ctrl_txt_image"]) if flag_image_as_hid_prompt else (self.controlnet_text_encoder, batch["ctrl_txt"])
                     encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
 
@@ -547,9 +496,9 @@ class Trainer():
                         torch.cuda.empty_cache()
 
                     if mask is not None and self.unet.config.in_channels == 9:
-                        if MASK_CTRL_OUT:
-                            mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
-                            down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
+                        # if controlnet is trained with MASK_CTRL_OUT this should be uncommented
+                        # mid_block_res_sample = mask_block(conditioning_image[:, :1], mid_block_res_sample)
+                        # down_block_res_samples = [mask_block(conditioning_image[:, :1], block) for block in down_block_res_samples]
                         noisy_latents_model_input_unet = torch.cat([noisy_latents_model_input, mask, masked_image_latents], dim=1)
 
                     # Predict the noise residual
@@ -567,17 +516,18 @@ class Trainer():
                         target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
                     else:
                         raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
+
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     # Object loss enhance
                     if LOSS_IN_SAM and batch.get("obj_mask", None) is not None and batch.get("obj_mask", None).any():
                         obj_mask = F.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
                         obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
-                        loss = loss*obj_mask
+                        loss += loss*obj_mask*0.1
 
                     loss = loss.mean()
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
-                        params_to_clip = self.controlnet.parameters()
+                        params_to_clip = list(filter(lambda p: p.requires_grad, list(self.lyco.parameters())))
                         self.accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     self.optimizer.step()
                     self.lr_scheduler.step()
@@ -613,7 +563,8 @@ class Trainer():
                             logger.info(f"Saved state to {save_path}")
 
                         if args.validation_file is not None and self.global_step % args.validation_steps == 0:
-                            log_validation(self.vae, self.text_encoder, self.controlnet_text_encoder, self.controlnet_image_encoder, self.tokenizer, self.unet, self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
+                            log_validation(self.vae, self.text_encoder, self.controlnet_text_encoder, self.controlnet_image_encoder, self.tokenizer, self.unet, self.lyco.state_dict(), self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
+                            torch.cuda.empty_cache()
 
                 logs = {"loss": loss.detach().item(), "lr": self.lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
@@ -625,8 +576,9 @@ class Trainer():
         # Create the pipeline using the trained modules and save it.
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
-            controlnet = self.accelerator.unwrap_model(self.controlnet)
-            controlnet.save_pretrained(args.output_dir)
+            unet = self.unet.to(torch.float32)
+            self.lyco.merge_to(1.0)
+            unet.save_pretrained(args.output_dir)
 
         self.accelerator.end_training()
 

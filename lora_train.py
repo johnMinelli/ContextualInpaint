@@ -21,7 +21,6 @@ import os
 import shutil
 from pathlib import Path
 
-import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -29,13 +28,10 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from diffusers.loaders import AttnProcsLayers, LoraLoaderMixin
-from diffusers.models.attention_processor import LoRAAttnProcessor
 from lycoris import create_lycoris, LycorisNetwork
 from diffusers.training_utils import cast_training_params
-from peft import set_peft_model_state_dict, get_peft_model_state_dict
 
-from dataset import DiffuserDataset
+from utils.dataset import DiffuserDataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
@@ -44,14 +40,13 @@ from transformers import AutoTokenizer, CLIPVisionModel, CLIPTextModel, CLIPText
     CLIPVisionModelWithProjection
 
 import diffusers
-from diffusers import (AutoencoderKL, ControlNetModel,StableDiffusionControlNetImg2ImgPipeline,
-                       StableDiffusionControlNetInpaintPipeline, UNet2DConditionModel, UniPCMultistepScheduler, DDPMScheduler)
+from diffusers import (AutoencoderKL, ControlNetModel, UNet2DConditionModel, UniPCMultistepScheduler,
+                       DDPMScheduler, PNDMScheduler)
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available, convert_unet_state_dict_to_peft, \
-    convert_state_dict_to_diffusers
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
-from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
+from pipeline.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 # from scheduler import DDIMScheduler
 from utils.parser import Train_args
 from utils.utils import import_text_encoder_from_model_name_or_path, replicate, mask_block, compute_centroid
@@ -62,14 +57,26 @@ if is_wandb_available():
 
 
 logger = get_logger(__name__)
-TRAIN_OBJ_MASKING = False
+# Implementation of training procedure with CLIP images/text. The images used are the cropped and resized objects present in the prompt.json with the name of "ctrl_txt_image".
+# Note, CLIPVisualEnc and CLIPTextEnc give in output (a different number of tokens, but this is not relevant, and) an embedding with a sifferent embedding size. In the normal implementation it does exists a projection layer being applied only to the last/first(?) token of the two output and project it in the common hidden dimension (that is the same as the CLIPTextEnc). This is standard to use it for all the tokens and have sequences of tokens representing image or text at same dimension.
+MULTIMODAL_CROSS_ATTN = False
+# Implementation of a weighted loss in the segmented area of the object (from Segment Anything on top of GroundingDINO detection). The object mask should be present in the prompt.json with name "obj_mask".
+LOSS_IN_SAM = False
 
-def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
+def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_encoder, tokenizer, unet, lyco_state, controlnet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
     # get trained network
     controlnet = accelerator.unwrap_model(controlnet)
     # costly deepcopy but necessary if you mod cross attention layers
     unet_clone = copy.deepcopy(unet)
+    LycorisNetwork.apply_preset({"target_module": ["Attention"]})
+    lyco = create_lycoris(unet_clone, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
+    lyco.apply_to()
+    lyco = lyco.cuda()
+    lyco.load_state_dict(lyco_state, strict=False)
+    lyco.restore()
+    lyco.cuda()
+    lyco.merge_to(1.0)
 
     pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -77,7 +84,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         text_encoder=text_encoder,
         controlnet_text_encoder=controlnet_text_encoder,
         controlnet_image_encoder=controlnet_image_encoder,
-        controlnet_prompt_seq_projection=TRAIN_OBJ_MASKING,
+        controlnet_prompt_seq_projection=True,
         tokenizer=tokenizer,
         unet=unet_clone,
         controlnet=controlnet,
@@ -85,7 +92,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         revision=args.revision,
         torch_dtype=weight_dtype,
     )
-    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
+    pipeline.scheduler = PNDMScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -108,23 +115,22 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
     neg_prompts = replicate(validation_data.get('validation_neg_prompts', []), n)
     control_prompts = replicate(validation_data.get('validation_control_prompts', []), n)
     focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
-    class_conditional = torch.tensor(validation_data.get('validation_class', [])).to(accelerator.device)
+    class_conditional = replicate(torch.tensor(validation_data.get('validation_class', [])).to(accelerator.device), n)
 
     image_logs = []
     for prompt, neg_prompt, image, mask, condition, control_prompt, focus_prompt, class_ in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts, class_conditional):
         image = Image.open(image).convert("RGB") if image is not None else None
-        mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
         mask = Image.open(mask).convert("L") if mask is not None else None
-        condition = Image.open(condition).convert("RGB") if condition is not None else None
+        mask_conditioning = Image.open(condition).convert("RGB") if condition is not None else None
         focus_prompt = [focus_prompt] if focus_prompt else None
 
         with torch.no_grad():
             pred_images = []
             for i in range(args.num_validation_images):
                 with torch.autocast(f"cuda"):
-                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt, class_conditional=class_, 
-                                          image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, 
-                                          strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=50, guidance_scale=7.5, guess_mode=i>1, generator=generator).images[0]
+                    pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, aux_focus_prompt=focus_prompt, dynamic_masking=i>1, class_conditional=class_,
+                                          image=image, mask_image=mask, conditioning_image=mask_conditioning, height=512, width=512, self_guidance_scale=0,
+                                          strength=1.0, controlnet_conditioning_scale=1.0, num_inference_steps=50, guidance_scale=7.5, guess_mode=True, generator=generator).images[0]
                 pred_images.append(pred_image)
 
             image_logs.append({"reference": image, "images": pred_images, "prompt": ", ".join([str(prompt), str(control_prompt)])})
@@ -210,7 +216,7 @@ class Trainer():
             )
 
         # Dataset
-        self.train_dataset = [DiffuserDataset(data_dir, args.train_data_file, 512, self.tokenizer, apply_transformations=TRAIN_OBJ_MASKING, dilated_conditioning_mask=not TRAIN_OBJ_MASKING) for data_dir in args.train_data_dir]
+        self.train_dataset = [DiffuserDataset(data_dir, args.train_data_file, 512, self.tokenizer, apply_transformations=False, dilated_conditioning_mask=False) for data_dir in args.train_data_dir]
         self.train_dataloader = torch.utils.data.DataLoader(torch.utils.data.ConcatDataset(self.train_dataset), shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers, drop_last=True)
 
         # import correct text encoder class
@@ -245,16 +251,16 @@ class Trainer():
 
             while len(models) > 0:
                 model = models.pop()
-
                 if isinstance(model, type(unwrap_model(self.unet))):
                     unet_ = model
                 else:
                     raise ValueError(f"unexpected save model: {model.__class__}")
 
-            lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))
-            self.lyco.load_state_dict(lyco_state)
-            # Make sure the trainable params are in float32. This is again needed since the base models
-            # are in `weight_dtype`. More details:
+            # mmm you don't have access to the lyco net here
+            # lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))
+            # self.lyco.load_state_dict(lyco_state)
+
+            # Make sure the trainable params are in float32. This is again needed since the base models are in `weight_dtype`. More details:
             # https://github.com/huggingface/diffusers/pull/6514#discussion_r1449796804
             if args.mixed_precision == "fp16":
                 models = [unet_]
@@ -267,16 +273,14 @@ class Trainer():
         self.accelerator.register_save_state_pre_hook(save_model_hook)
         self.accelerator.register_load_state_pre_hook(load_model_hook)
 
-        self.unet.requires_grad_(False)
         self.vae.requires_grad_(False)
+        self.unet.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
-        self.unet.train()
 
-        # LycorisNetwork.apply_preset({"target_name": [".*attn.*"]})  # Transformer2DModel
-        LycorisNetwork.apply_preset({"target_module": ["Attention"],})
+        LycorisNetwork.apply_preset({"target_module": ["Attention"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
         self.lyco = create_lycoris(self.unet, 1.0, linear_dim=args.rank, linear_alpha=args.alpha_rank, algo=args.lycorice_algo).cuda()
         self.lyco.apply_to()
-        self.lyco = self.lyco.cuda()
+        self.lyco.cuda()
 
         # Setup LoRA weights to the attention layers
         # It's important to realize here how many attention weights will be added and of which sizes
@@ -290,30 +294,6 @@ class Trainer():
         # - mid blocks (2x attention layers) * (1x transformer layers) * (1x mid blocks) = 2
         # - up blocks (2x attention layers) * (3x transformer layers) * (3x down blocks) = 18
         # => 32 layers
-        # from peft import LoraConfig, PeftModel, get_peft_model
-        # 
-        # unet_lora_config = LoraConfig(r=args.rank, lora_alpha=args.rank, init_lora_weights="gaussian",
-        #     target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"], )
-        # self.unet.add_adapter(unet_lora_config)
-
-        # # Set correct lora layers
-        # lora_attn_procs = {}
-        # for name in self.unet.attn_processors.keys():
-        #     cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
-        #     if name.startswith("mid_block"):
-        #         hidden_size = self.unet.config.block_out_channels[-1]
-        #     elif name.startswith("up_blocks"):
-        #         block_id = int(name[len("up_blocks.")])
-        #         hidden_size = list(reversed(self.unet.config.block_out_channels))[block_id]
-        #     elif name.startswith("down_blocks"):
-        #         block_id = int(name[len("down_blocks.")])
-        #         hidden_size = self.unet.config.block_out_channels[block_id]
-        # 
-        #     lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim,
-        #         rank=args.rank, )
-        # 
-        # self.unet.set_attn_processor(lora_attn_procs)
-        # self.lora_layers = AttnProcsLayers(self.unet.attn_processors)
 
         # Settings for optimization
         if args.enable_xformers_memory_efficient_attention:
@@ -387,8 +367,8 @@ class Trainer():
         self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler)
 
         # Move vae, and text_encoder to device and cast to weight_dtype
-        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         # Init class to have access to utility functions (refactoring to static methods would be nicer)
         self.pipe_utils = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(args.pretrained_model_name_or_path, vae=self.vae, text_encoder=self.text_encoder, tokenizer=self.tokenizer, controlnet=self.controlnet, unet=self.unet, safety_checker=None, revision=args.revision, torch_dtype=self.weight_dtype)
@@ -439,6 +419,8 @@ class Trainer():
                 #     save_file(a, os.path.join(args.output_dir, path, "controlnet", "diffusion_pytorch_model.safetensors"))
                 self.accelerator.print(f"Resuming from checkpoint {path}")
                 self.accelerator.load_state(os.path.join(args.output_dir, path))
+                lyco_state = torch.load(os.path.join(os.path.join(args.output_dir, path), "lycorice.ckpt"))
+                self.lyco.load_state_dict(lyco_state)
                 self.global_step = int(path.split("-")[1])
 
                 self.initial_global_step = self.global_step
@@ -460,6 +442,7 @@ class Trainer():
         )
 
         for epoch in range(self.first_epoch, args.num_train_epochs):
+            self.unet.train()
             for step, batch in enumerate(self.train_dataloader):
                 with self.accelerator.accumulate(self.unet):
                     # Convert images to latent space
@@ -473,9 +456,6 @@ class Trainer():
                     # Sample random noise and add it to the latents according to the noise magnitude at each timestep (forward diffusion process)
                     noise = torch.randn_like(latents)
 
-                    # if mask is not None and self.unet.config.in_channels == 4:
-                    #     noise[torch.nn.functional.interpolate(mask, size=noise.shape[-2:]).expand(noise.shape)==0]=0
-
                     noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
                     noisy_latents_model_input = noisy_latents
                     timesteps_model_input = timesteps
@@ -483,7 +463,7 @@ class Trainer():
                     # Mask and latents from masked_image
                     if mask is not None:
                         masked_image = image.clone()
-                        masked_image[mask.expand(image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
+                        masked_image[mask.expand(image.shape) > 0.5] = 0  # 0 masking in a [-1,1] image because this is what the unet wants
                         mask, masked_image_latents = self.pipe_utils.prepare_mask_latents(mask, masked_image, 1, h, w, self.weight_dtype, self.accelerator.device, generator=None, do_classifier_free_guidance=False)
 
                     encoder_hidden_states = self.pipe_utils.encode_prompt(batch["txt"], self.accelerator.device, False, self.text_encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
@@ -509,7 +489,7 @@ class Trainer():
 
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     # Object loss enhance
-                    if batch.get("obj_mask", None) is not None:
+                    if LOSS_IN_SAM and batch.get("obj_mask", None) is not None and batch.get("obj_mask", None).any():
                         obj_mask = F.interpolate(batch.get("obj_mask"), size=(h // self.pipe_utils.vae_scale_factor, w // self.pipe_utils.vae_scale_factor))
                         obj_mask = obj_mask.to(device=self.accelerator.device, dtype=self.weight_dtype)
                         loss += loss*obj_mask*0.1
@@ -517,7 +497,7 @@ class Trainer():
                     loss = loss.mean()
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
-                        params_to_clip = list(filter(lambda p: p.requires_grad, self.unet.parameters()))
+                        params_to_clip = list(filter(lambda p: p.requires_grad, list(self.lyco.parameters())))
                         self.accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     self.optimizer.step()
                     self.lr_scheduler.step()
@@ -553,7 +533,8 @@ class Trainer():
                             logger.info(f"Saved state to {save_path}")
 
                         if args.validation_file is not None and self.global_step % args.validation_steps == 0:
-                            log_validation(self.vae, self.text_encoder, self.controlnet_text_encoder, self.controlnet_image_encoder, self.tokenizer, self.unet, self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
+                            log_validation(self.vae, self.text_encoder, self.controlnet_text_encoder, self.controlnet_image_encoder, self.tokenizer, self.unet, self.lyco.state_dict(), self.controlnet, self.args, self.accelerator, self.weight_dtype, self.global_step)
+                            torch.cuda.empty_cache()
 
                 logs = {"loss": loss.detach().item(), "lr": self.lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
@@ -579,5 +560,4 @@ if __name__ == "__main__":
     if args.seed is not None:
         set_seed(args.seed)
 
-    args.drag_attention = False
     Trainer(args).train()
