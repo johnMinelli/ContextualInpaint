@@ -1,4 +1,6 @@
-﻿import torch
+﻿# Utility class to call LLaVA predictor
+
+import torch
 
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
