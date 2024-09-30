@@ -55,7 +55,6 @@ RUN python -m pip install --upgrade pip
 RUN pip install -e LLaVA_repo
 RUN pip install git+https://github.com/facebookresearch/segment-anything.git
 
-
 ENV CUDA_HOME=/usr/local/cuda-11.7
 ENV PATH=/usr/local/cuda-11.7/bin:$PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda-11.7/lib64:$LD_LIBRARY_PATH
@@ -86,11 +85,3 @@ RUN pip install diffusers==0.26.0
 RUN pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2
 
 WORKDIR /home/appuser/ContextualInpaint/preprocess
-
-# python preprocess.py --action mask --input_path /mounted_input --output_path /mounted_output  
-# python preprocess.py --action pose --input_path /mounted_input --output_path /mounted_output
-# python preprocess.py --action prompt --input_path /mounted_input --output_path /mounted_output
-
-# cd ContextualInpaint/
-# pip install -r requirements.txt
-# python diffuser_train.py --pretrained_model_name_or_path=stabilityai/stable-diffusion-2-inpainting --output_dir=../<model_store_folder>/ --train_data_dir ../<data_root_folder>/ --num_train_epochs 11 --sd_unlock 6 --checkpointing_steps 3000 --gradient_accumulation_steps 4 --train_batch_size 4

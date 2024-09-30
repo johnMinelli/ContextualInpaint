@@ -1,0 +1,21 @@
+﻿{
+  "validation_images": [
+    "./data/validation/0.png",
+    "./data/validation/1.png"
+  ],
+  "validation_prompts": [
+    "a red circle with green background",
+    "a red circle with blue background"
+  ],
+  "validation_neg_prompts": [
+    "cropped, lowres, blurry, bad art, blurred, text, watermark, deformed",
+    "cropped, lowres, blurry, bad art, blurred, text, watermark, deformed"
+  ],
+  "validation_masks": [
+    
+  ],
+  "validation_controls": [
+    "./data/validation/0_canny.png",
+    "./data/validation/1_canny.png"
+  ]
+}
