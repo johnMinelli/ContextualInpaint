@@ -456,11 +456,11 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             )
 
         # Check `prompt`
-        # if prompt is not None and prompt_embeds is not None:
-        #     raise ValueError(
-        #         f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-        #         " only forward one of the two."
-        #     )
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+                " only forward one of the two."
+            )
         if prompt is None and prompt_embeds is None:
             raise ValueError(
                 "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
