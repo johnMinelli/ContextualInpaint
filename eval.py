@@ -1,50 +1,56 @@
 import codecs
 import json
 
+
+import wandb
+from lycoris import create_lycoris, LycorisNetwork
 from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from transformers import CLIPTextModelWithProjection
-
-import wandb
 from accelerate.logging import get_logger
-from diffusers import ControlNetModel, DDIMScheduler
+from diffusers import ControlNetModel, DDIMScheduler, PNDMScheduler, DDPMScheduler
 import numpy as np
 import torch
 
 from PIL import Image
 
-from pipelines.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
+from pipeline.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from utils.parser import Eval_args
 from utils.utils import replicate
 
 logger = get_logger(__name__)
 
 args = Eval_args().parse_args()
-CONTROLNET_OBJ_MASKING = False
 
 
 # load control net and stable diffusion v1-5
-controlnet = None
-if len(args.controlnet_model_name_or_path)>1:
-    assert CONTROLNET_OBJ_MASKING, "`CONTROLNET_OBJ_MASKING` is False but more than 1 model is provided. This is not an intended use."
-    controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
-elif len(args.controlnet_model_name_or_path)==1:
-    logger.warn(f"`CONTROLNET_OBJ_MASKING` is {CONTROLNET_OBJ_MASKING}. Make sure you are running the intended controlnet model.")
-    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path[0], torch_dtype=torch.float32)
+controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
 controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
 
+# init pipeline
 pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
-        controlnet=controlnet, 
-        controlnet_text_encoder=controlnet_text_encoder, 
+        controlnet=controlnet,
+        controlnet_text_encoder=controlnet_text_encoder,
+        controlnet_prompt_seq_projection=True,
         safety_checker=None,
-        controlnet_prompt_seq_projection=CONTROLNET_OBJ_MASKING,
         revision=args.revision,
         torch_dtype=torch.float32
     ).to(torch.device("cuda"))
-pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 
-# optimization
+# init LoRA modules
+if args.lora_path is not None:
+    LycorisNetwork.apply_preset({"target_module": ["Attention"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
+    lyco = create_lycoris(pipeline.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
+    lyco.apply_to()
+    lyco_state = torch.load(f"{args.lora_path}/lycorice.ckpt", map_location=torch.device("cuda"))
+    lyco.load_state_dict(lyco_state, strict=False)
+    lyco.restore()
+    lyco.cuda()
+    lyco.merge_to(1.0)
+
+# memory optimization
 if args.enable_cpu_offload:
     pipeline.enable_model_cpu_offload()
 if args.enable_xformers_memory_efficient_attention:
@@ -55,6 +61,7 @@ if args.seed is None:
     generator = None
 else:
     generator = torch.Generator(device=pipeline.device).manual_seed(args.seed)
+    np.random.seed(args.seed)
 
 validation_data = json.load(codecs.open(args.evaluation_file, 'r', 'utf-8-sig'))
 
@@ -81,9 +88,9 @@ for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt 
     for _ in range(args.num_validation_images):
         with torch.no_grad():
             with torch.autocast(f"cuda"):
-                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, focus_prompt=focus_prompt,
+                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, aux_focus_token=focus_prompt, dynamic_masking=True,
                                       image=image, mask_image=mask, conditioning_image=[mask_conditioning]*len(controlnet) if type(controlnet)==list else mask_conditioning, height=512, width=512,
-                                      strength=1.0, controlnet_conditioning_scale=1., num_inference_steps=50, guidance_scale=9, guess_mode=True, generator=generator).images[0]
+                                      strength=1.0, controlnet_conditioning_scale=1., num_inference_steps=40, guidance_scale=8, guess_mode=True, generator=generator).images[0]
             images.append(pred_image)
 
     image_logs.append({"reference": image, "images": images, "prompt": prompt})
