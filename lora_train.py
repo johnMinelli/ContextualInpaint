@@ -251,10 +251,10 @@ class Trainer():
 
             while len(models) > 0:
                 model = models.pop()
-                if isinstance(model, type(unwrap_model(self.unet))):
-                    unet_ = model
-                else:
-                    raise ValueError(f"unexpected save model: {model.__class__}")
+                # if isinstance(model, type(unwrap_model(self.unet))):
+                #     unet_ = model
+                # else:
+                #     raise ValueError(f"unexpected save model: {model.__class__}")
 
             # mmm you don't have access to the lyco net here
             # lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))

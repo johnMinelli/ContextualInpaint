@@ -26,6 +26,8 @@ args = Eval_args().parse_args()
 # load control net and stable diffusion v1-5
 controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
 controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
+if len(controlnet) == 1:
+    controlnet = controlnet[0]
 
 # init pipeline
 pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
@@ -41,7 +43,7 @@ pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 
 # init LoRA modules
 if args.lora_path is not None:
-    LycorisNetwork.apply_preset({"target_module": ["Attention"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
+    LycorisNetwork.apply_preset({"target_module": ["ResnetBlock2D"]})  # by module (e.g. Attention, Transformer2DModel, ResnetBlock2D) or by wildcard (e.g. {"target_name": [".*attn.*"]})
     lyco = create_lycoris(pipeline.unet, 1.0, linear_dim=64, linear_alpha=32, algo="lora").cuda()
     lyco.apply_to()
     lyco_state = torch.load(f"{args.lora_path}/lycorice.ckpt", map_location=torch.device("cuda"))
@@ -66,22 +68,21 @@ else:
 validation_data = json.load(codecs.open(args.evaluation_file, 'r', 'utf-8-sig'))
 
 # Access the values as a dictionary
-images = validation_data['images']
+images = validation_data['validation_images']
 n = len(images)
-conditioning = replicate(validation_data.get('conditioning', []), n)
-masks = replicate(validation_data.get('masks', []), n)
-prompts = replicate(validation_data.get('prompts', []), n)
-neg_prompts = replicate(validation_data.get('neg_prompts', []), n)
-control_prompts = replicate(validation_data.get('control_prompts', []), n)
-focus_prompts = replicate(validation_data.get('focus_prompts', []), n)
+conditioning = replicate(validation_data.get('validation_conditioning', []), n)
+masks = replicate(validation_data.get('validation_masks', []), n)
+prompts = replicate(validation_data.get('validation_prompts', []), n)
+neg_prompts = replicate(validation_data.get('validation_neg_prompts', []), n)
+control_prompts = replicate(validation_data.get('validation_control_prompts', []), n)
+focus_prompts = replicate(validation_data.get('validation_focus_prompts', []), n)
 
 
 image_logs = []
 for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt in zip(prompts, neg_prompts, images, masks, conditioning, control_prompts, focus_prompts):
     image = Image.open(image).convert("RGB") if image is not None else None
-    mask_conditioning = Image.open(mask).convert("RGB") if mask is not None else None
     mask = Image.open(mask).convert("L") if mask is not None else None
-    conditioning = Image.open(conditioning).convert("RGB") if conditioning is not None else None
+    mask_conditioning = Image.open(conditioning).convert("RGB") if conditioning is not None else None
     focus_prompt = [focus_prompt] if focus_prompt else None
 
     images = []

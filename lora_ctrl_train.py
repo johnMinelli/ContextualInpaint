@@ -51,7 +51,7 @@ from utils.utils import import_text_encoder_from_model_name_or_path, replicate, 
 
 if is_wandb_available():
     import wandb
-    # wandb.init(project="train_controlnet", resume="wrjd7704")
+    wandb.init(project="train_controlnet", resume="o0emanqi")
 
 
 logger = get_logger(__name__)
@@ -258,10 +258,10 @@ class Trainer():
 
             while len(models) > 0:
                 model = models.pop()
-                if isinstance(model, type(unwrap_model(self.unet))):
-                    unet_ = model
-                else:
-                    raise ValueError(f"unexpected save model: {model.__class__}")
+                # if isinstance(model, type(unwrap_model(self.unet))):
+                #     unet_ = model
+                # else:
+                #     raise ValueError(f"unexpected save model: {model.__class__}")
 
             # mmm you don't have access to the lyco net here
             # lyco_state = torch.load(os.path.join(input_dir, "lycorice.ckpt"))
@@ -404,7 +404,7 @@ class Trainer():
             args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         # Afterward we recalculate our number of training epochs
         args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
+        args.resume = "latest"
         # Load the weights and states from a previous save, if necessary
         if args.resume:
             if args.resume != "latest":
