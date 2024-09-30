@@ -15,7 +15,7 @@ from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import FromSingleFileMixin, LoraLoaderMixin, TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, ControlNetModel, UNet2DConditionModel
 from diffusers.models.attention_processor import AttnProcessor
-from attenprocessor import CrossAttnProcessor, AttentionStore, GaussianSmoothing
+from pipeline.attenprocessor import CrossAttnProcessor, AttentionStore, GaussianSmoothing
 from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (
@@ -456,12 +456,12 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
             )
 
         # Check `prompt`
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
+        # if prompt is not None and prompt_embeds is not None:
+        #     raise ValueError(
+        #         f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+        #         " only forward one of the two."
+        #     )
+        if prompt is None and prompt_embeds is None:
             raise ValueError(
                 "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
             )
@@ -1152,7 +1152,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                 # repeat for the batch if needed
                 init_mask = init_mask.repeat(batch_size // init_mask.shape[0], 1, 1, 1)  # (b,c,h,w)
                 masked_image = init_image.clone()
-                masked_image[init_mask.expand(init_image.shape) > 0.5] = 0  # 0 in [-1,1] image because this is what sd wants
+                masked_image[init_mask.expand(init_image.shape) > 0.5] = 0  # 0 masking in a [-1,1] image because this is what the unet wants
                 height, width = init_image.shape[-2:]
 
         # 5. Prepare timesteps
@@ -1358,7 +1358,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         tokens_position = torch.cat([torch.stack([torch.tensor([p_ == aux_focus_token for p_ in p[0]])] * num_images_per_prompt) for p in prompt_ids.chunk(batch_size)])
                     elif self.num_focus_prompts > 0:  # search the token in prompt 
                         tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
-                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.995)
+                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.98)
                     # self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
                     # self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
                     self.attn_mask = attn_mask.unsqueeze(1)  # store to be used in next step
