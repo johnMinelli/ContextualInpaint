@@ -15,7 +15,7 @@ from diffusers import ControlNetModel, PNDMScheduler, DDPMScheduler, UniPCMultis
 from data.vcoco.categories import object_categories
 from utils.dataset import ProcDataset, DiffuserDataset
 
-from preprocess.dataset_ditribution import read_json, count_triplets
+from preprocess.dataset_ditribution_study import read_json, count_triplets
 from utils.data_utils import proc_collate_fn
 from pipeline.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from utils.dataset import SynthDataset
@@ -38,25 +38,29 @@ def save_locally(log, out_path, out_json):
             file.write('[')
 
     image = log["image"]
-    draw = ImageDraw.Draw(image)
-
-    # Draw bounding boxes for subjects
-    for subject_bbox in log["hoi_subjects"]:
-        draw.rectangle(subject_bbox, outline="red", width=2)
-    # Draw bounding boxes for objects
-    for object_bbox in log["hoi_objects"]:
-        draw.rectangle(object_bbox, outline="blue", width=2)
-
-    for hoi_ann in log["hoi_annotation"]:
-        draw.rectangle(log["annotations"][hoi_ann["subject_id"]]["bbox"], outline="green", width=2)
-        draw.rectangle(log["annotations"][hoi_ann["object_id"]]["bbox"], outline="green", width=2)
+    # draw = ImageDraw.Draw(image)
+    # 
+    # # Draw bounding boxes for subjects
+    # for subject_bbox in log["hoi_subjects"]:
+    #     draw.rectangle(subject_bbox, outline="red", width=2)
+    # # Draw bounding boxes for objects
+    # for object_bbox in log["hoi_objects"]:
+    #     draw.rectangle(object_bbox, outline="blue", width=2)
+    # 
+    # for hoi_ann in log["hoi_annotation"]:
+    #     draw.rectangle(log["annotations"][hoi_ann["subject_id"]]["bbox"], outline="green", width=2)
+    #     draw.rectangle(log["annotations"][hoi_ann["object_id"]]["bbox"], outline="green", width=2)
     # save image
     filename = os.path.splitext(log["source_filename"])[0] + "_" + str(log["id"]) + os.path.splitext(log["source_filename"])[1]
     image.save(os.path.join(out_path, filename))
     # append hoi
-    hoi_annotation = log["hoi_annotation"] + [{"subject_id":  len(log["annotations"])+s_i, "category_id": log["role_category"], "object_id": len(log["annotations"])+len(log["hoi_subjects"])+o_i} for s_i, _ in enumerate(log["hoi_subjects"]) for o_i, _ in enumerate(log["hoi_objects"])]
+    hoi_annotation = log["hoi_annotation"] + [{"subject_id":  len(log["annotations"])+s_i, "category_id": log["role_category"], "object_id": len(log["annotations"])+len(log["hoi_subjects"])+o_i} 
+                                              for s_i, _ in enumerate(log["hoi_subjects"]) for o_i, _ in enumerate(log["hoi_objects"])]
     annotations = log["annotations"] + [{"category_id": log["subject_category"], "bbox": subject_bbox} for subject_bbox in log["hoi_subjects"]]+ \
                    [{"category_id": log["object_category"], "bbox": object_bbox} for object_bbox in log["hoi_objects"]]
+    for hoi in hoi_annotation:
+        hoi['hoi_category_id'] = hico_hoi_list[str((annotations[hoi['subject_id']]["category_id"], hoi['category_id'], annotations[hoi['object_id']]["category_id"]))]['id']
+
     json_line = {"file_name": filename, "hoi_annotation": hoi_annotation, "annotations": annotations}
     with open(os.path.join(out_path, out_json), 'a') as outfile:
         json.dump(json_line, outfile)
@@ -163,11 +167,13 @@ else:
     np.random.seed(args.seed)
 
 # data
-fix = "hicodet_cg25"
+fix = "hicodet2_cg40_2"
 gen_start_index = 0
 valid_counts = {}
 invalid_counts = {}
 hoi_categories =  count_triplets(read_json(["/data01/gio/ctrl/data/hicodet/annotations/trainval_hico.json"]))
+with open("/data01/gio/ctrl/data/hicodet/hico_object_verb_associations.json", 'r') as f:
+    hico_hoi_list = json.load(f)
 weights = {cat: 1 / count for cat, count in hoi_categories.items()}
 tot_w = sum(weights.values())
 cat_probabilities = {cat: w / tot_w for cat, w in weights.items()}
@@ -182,7 +188,7 @@ for gen_id, batch in enumerate(dataloader):
         with torch.autocast(f"cuda"):
             pred_images = pipeline(prompt=batch["txt"], controlnet_prompt=batch["ctrl_txt"], negative_prompt=batch["neg_txt"], aux_focus_prompt=batch["neg_txt"], dynamic_masking=True,
                                   image=batch["image"], mask_image=batch["mask"], conditioning_image=batch["conditioning"], height=512, width=512, 
-                                  strength=1.0, controlnet_conditioning_scale=0.8, num_inference_steps=50, guidance_scale=7.5, self_guidance_scale=0,
+                                  strength=1.0, controlnet_conditioning_scale=0.9, num_inference_steps=40, guidance_scale=7.5, self_guidance_scale=0,
                                   guess_mode=True, generator=generator, gradient_checkpointing=args.gradient_checkpointing, return_dict=False)
             hoi_results = check_hoi_dino(pred_images, batch["mask"], [object_categories[int(sc)] for sc in batch["subject_category"]], [object_categories[int(oc)] for oc in batch["object_category"]], [json.loads(b2i) for b2i in batch["boxes_to_ignore"]])
 
@@ -202,8 +208,8 @@ for gen_id, batch in enumerate(dataloader):
 
     total_valid = sum(valid_counts.values())
     observed_distribution = {category: count / total_valid if total_valid > 0 else 0 for category, count in valid_counts.items()}
-
-    new_sampling_distribution = {cat: max(0, val - (observed_distribution.get(cat, 0)*0.8)) for cat, val in sampling_distribution.items()}
+    invalid_discounts = {cat:1+10*np.log(1-val/(sum(invalid_counts.values())+1e-8)) for cat, val in invalid_counts.items()}
+    new_sampling_distribution = {cat: max(0, (val - (observed_distribution.get(cat, 0)*0.8))*invalid_discounts.get(cat, 1)) for cat, val in sampling_distribution.items()}
     total = sum(new_sampling_distribution.values())
     new_sampling_distribution = {category: prob / total for category, prob in new_sampling_distribution.items()}
     dataset.update_cat_proportions(new_sampling_distribution)

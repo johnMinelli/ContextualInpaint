@@ -51,7 +51,7 @@ from utils.utils import import_text_encoder_from_model_name_or_path, replicate, 
 
 if is_wandb_available():
     import wandb
-    wandb.init(project="train_controlnet", resume="o0emanqi")
+    # wandb.init(project="train_controlnet", resume="o0emanqi")
 
 
 logger = get_logger(__name__)
@@ -82,7 +82,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         text_encoder=text_encoder,
         controlnet_text_encoder=controlnet_text_encoder,
         controlnet_image_encoder=controlnet_image_encoder,
-        controlnet_prompt_seq_projection=True,
+        controlnet_prompt_seq_projection=False,
         tokenizer=tokenizer,
         unet=unet_clone,
         controlnet=controlnet,
@@ -90,7 +90,7 @@ def log_validation(vae, text_encoder, controlnet_text_encoder, controlnet_image_
         revision=args.revision,
         torch_dtype=weight_dtype,
     )
-    pipeline.scheduler = PNDMScheduler.from_config(pipeline.scheduler.config)
+    pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -224,7 +224,7 @@ class Trainer():
         self.noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         self.text_encoder = text_encoder_cls.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
         # Custom encoder since sd2 doesn't have the weights for the visual counterpart necessary for obj_masking controlnet 
-        self.controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+        self.controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
         self.controlnet_image_encoder = CLIPVisionModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
         self.vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
         self.unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision)  # , local_files_only=True
@@ -481,8 +481,8 @@ class Trainer():
                     encoder_hidden_states_ctrl = self.pipe_utils.encode_prompt(ctrl_prompt, self.accelerator.device, False, encoder, num_images_per_prompt=1, negative_prompt=batch["no_txt"], return_tuple=False)
 
                     # Apply projection layer to all sequence tokens to match size between the two encoders. Apparently there is no loss in performance so we do it anyway to avoid misuse later on 
-                    encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
-                        if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
+                    # encoder_hidden_states_ctrl = self.controlnet_image_encoder.visual_projection(encoder_hidden_states_ctrl) \
+                    #     if flag_image_as_hid_prompt else self.controlnet_text_encoder.text_projection(encoder_hidden_states_ctrl)
 
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         noisy_latents_model_input, timesteps_model_input,

@@ -74,6 +74,6 @@ def main(files_path):
 
 
 if __name__ == "__main__":
-    real_annotations = "/data01/gio/ctrl/data/vcoco/annotations/trainval_vcoco.json"
-    synth_annotations = "/data01/gio/ctrl/out/train_data_gen_th_vcoco_cg25/gen_fin.json"
-    main([real_annotations])
+    real_annotations = "/data01/gio/ctrl/data/hicodet/annotations/trainval_hico.json"
+    synth_annotations = "/data01/gio/ctrl/out/gen_fin.json"
+    main([real_annotations, synth_annotations])

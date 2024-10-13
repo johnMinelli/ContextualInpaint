@@ -6,9 +6,9 @@ import wandb
 from lycoris import create_lycoris, LycorisNetwork
 from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
-from transformers import CLIPTextModelWithProjection
+from transformers import CLIPTextModelWithProjection, CLIPVisionModelWithProjection, AutoTokenizer
 from accelerate.logging import get_logger
-from diffusers import ControlNetModel, DDIMScheduler, PNDMScheduler, DDPMScheduler
+from diffusers import ControlNetModel, DDIMScheduler, PNDMScheduler, DDPMScheduler, AutoencoderKL, UNet2DConditionModel
 import numpy as np
 import torch
 
@@ -16,25 +16,42 @@ from PIL import Image
 
 from pipeline.pipeline_stable_diffusion_controlnet_inpaint import StableDiffusionControlNetImg2ImgInpaintPipeline
 from utils.parser import Eval_args
-from utils.utils import replicate
+from utils.utils import replicate, import_text_encoder_from_model_name_or_path
 
 logger = get_logger(__name__)
 
 args = Eval_args().parse_args()
 
 
+tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, use_fast=False)
+noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+
+# import correct text encoder class
+text_encoder_cls = import_text_encoder_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
+text_encoder = text_encoder_cls.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+
+# Custom encoder since sd2 doesn't have the weights for the visual counterpart necessary for obj_masking controlnet 
+controlnet_text_encoder = text_encoder_cls.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision).to(torch.device("cuda"))
+controlnet_image_encoder = CLIPVisionModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
+
 # load control net and stable diffusion v1-5
 controlnet = [ControlNetModel.from_pretrained(net_path, torch_dtype=torch.float32) for net_path in args.controlnet_model_name_or_path] if args.controlnet_model_name_or_path is not None else None
-controlnet_text_encoder = CLIPTextModelWithProjection.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(torch.device("cuda"))
+vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
+unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision)
+
 if len(controlnet) == 1:
     controlnet = controlnet[0]
 
 # init pipeline
 pipeline = StableDiffusionControlNetImg2ImgInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
+        vae=vae,
+        tokenizer=tokenizer,
+        unet=unet,
+        text_encoder=text_encoder, 
         controlnet=controlnet,
         controlnet_text_encoder=controlnet_text_encoder,
-        controlnet_prompt_seq_projection=True,
+        controlnet_prompt_seq_projection=False,
         safety_checker=None,
         revision=args.revision,
         torch_dtype=torch.float32
@@ -89,9 +106,9 @@ for prompt, neg_prompt, image, mask, conditioning, control_prompt, focus_prompt 
     for _ in range(args.num_validation_images):
         with torch.no_grad():
             with torch.autocast(f"cuda"):
-                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, aux_focus_token=focus_prompt, dynamic_masking=True,
+                pred_image = pipeline(prompt=prompt, controlnet_prompt=control_prompt, negative_prompt=neg_prompt, aux_focus_token=focus_prompt, dynamic_masking=False,
                                       image=image, mask_image=mask, conditioning_image=[mask_conditioning]*len(controlnet) if type(controlnet)==list else mask_conditioning, height=512, width=512,
-                                      strength=1.0, controlnet_conditioning_scale=0.0, num_inference_steps=40, guidance_scale=8, guess_mode=True, generator=generator).images[0]
+                                      strength=1.0, controlnet_conditioning_scale=1.0, num_inference_steps=40, guidance_scale=8, guess_mode=True, generator=generator).images[0]
             images.append(pred_image)
 
     image_logs.append({"reference": image, "images": images, "prompt": prompt})

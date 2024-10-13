@@ -165,7 +165,7 @@ class SynthDataset(Dataset):
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.mask_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True)
         self.conditioning_image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False)
-        self.neg_prompt = "inconsistent styles, blurred, text, watermark, poorly drawn face, poorly drawn hands, disfigured human, deformed body, deformed face, no human, no face, many arms, many hands, many legs, unrealistic proportions"
+        self.neg_prompt = "inconsistent styles, blurred, text, watermark, poorly drawn face, poorly drawn hands, disfigured human, deformed body, deformed face, no human, no face, child, baby, many arms, many hands, many legs, unrealistic proportions"
         
         if self.categories is not None:
             # weighted sampling; data indexed by category

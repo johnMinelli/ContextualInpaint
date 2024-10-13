@@ -1358,7 +1358,7 @@ class StableDiffusionControlNetImg2ImgInpaintPipeline(
                         tokens_position = torch.cat([torch.stack([torch.tensor([p_ == aux_focus_token for p_ in p[0]])] * num_images_per_prompt) for p in prompt_ids.chunk(batch_size)])
                     elif self.num_focus_prompts > 0:  # search the token in prompt 
                         tokens_position = torch.cat([torch.stack([p[0] == fp[torch.logical_and(fp > 0, fp < 49406)][0]] * num_images_per_prompt) for p, fp in zip(prompt_ids.chunk(batch_size), focus_prompt_ids.chunk(batch_size))])
-                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.995)
+                    attn_mask, attn_map = self.attention_store.get_cross_attention_mask(["down", "up"], 32, 0, tokens_position, 0.9)
                     # self.attn_cum_filter =  attn_map if self.attn_cum_filter.size(0) == 0 else torch.stack([self.attn_cum_filter, attn_map]).sum(0)  # (filter helper)
                     # self.attn_filter = attn_map.flatten(start_dim=1).max(-1)[0]>filter_th
                     self.attn_mask = attn_mask.unsqueeze(1)  # store to be used in next step
